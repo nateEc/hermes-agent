@@ -15,7 +15,7 @@ jobs:
     steps:
       - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
         with:
-          ref: 91cda9b148c7f71094dea4e44acff7c370a30135
+          ref: 7feae4f551b103cbd98bca4b7273bf0cd0e0f88e
           fetch-depth: 0
       - name: Set up locked Python and test dependencies
         uses: ./.github/actions/setup-pm
@@ -24,7 +24,11 @@ jobs:
           test-environment: 'true'
           cache: 'false'
           cache-python: 'false'
-      - name: Execute native launchers and service identity regressions
+      - name: Execute native Unicode launchers including CP437
+        shell: bash
+        run: |
+          bash scripts/run_tests.sh tests/hermes_cli/test_gateway_windows.py -k test_native_unicode_launcher_runs_in_requested_home --fail-on-skip -v -j 1
+      - name: Execute launcher and service identity regressions
         shell: bash
         run: |
           bash scripts/run_tests.sh tests/hermes_cli/test_gateway_windows.py tests/hermes_cli/test_gateway_runtime_service.py -q -j 2
