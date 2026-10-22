@@ -143,6 +143,21 @@ def _is_protected_dir(p: Path) -> bool:
         return not rel.parts or rel.parts[0] in _EMPTY_DIR_PROTECTED_TOP_LEVEL
     return False
 
+
+# The user trees a persistent sandbox bind-mounts to the container: ``workspace`` is ``/workspace``
+# and ``home`` is ``/root``, and both live at ``$HERMES_HOME/sandboxes/<backend>/<profile>/``. They
+# are the same durable deliverables as the top-level ``workspace``/``home`` in
+# ``_NEVER_TRACK_TOP_LEVEL``, one directory deeper than that check looks: ``rel.parts[0]`` is
+# ``sandboxes`` for them, so the frozenset never matched and a ``test_*`` the agent wrote into the
+# sandbox was classified disposable and deleted when the session ended (#143104).
+_SANDBOX_DURABLE_TREES = frozenset({"workspace", "home"})
+
+
+def _is_durable_sandbox_path(rel: Path) -> bool:
+    """True when *rel* is one of the user trees a persistent sandbox mirrors."""
+    return bool(rel.parts) and rel.parts[0] == "sandboxes" and any(
+        part in _SANDBOX_DURABLE_TREES for part in rel.parts[1:])
+
 @functools.lru_cache(maxsize=8)  # keyed by home: a multiplexed process serves several profiles
 def _protected_cron_paths(home: Path) -> frozenset:
     """Defense-in-depth for quick(): EXACT cron control-plane paths (``cron/``, ``output/`` root,
@@ -413,7 +428,7 @@ def guess_category(path: Path) -> Optional[str]:
     with contextlib.suppress(ValueError):  # not under HERMES_HOME (/tmp/hermes-*) — name rules only
         rel = path.resolve().relative_to(get_hermes_home())
         top = rel.parts[0] if rel.parts else ""
-        if top in _NEVER_TRACK_TOP_LEVEL or _is_protected_dir(path):
+        if top in _NEVER_TRACK_TOP_LEVEL or _is_protected_dir(path) or _is_durable_sandbox_path(rel):
             return None
         if top in ("cron", "cronjobs"):
             # Only the disposable ``output/`` subtree; control-plane state (jobs.json,

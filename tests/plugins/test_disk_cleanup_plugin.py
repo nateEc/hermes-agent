@@ -709,3 +709,47 @@ class TestBundledDiscovery:
         mgr.discover_and_load()
         assert "memory" not in mgr._plugins
         assert "context_engine" not in mgr._plugins
+
+
+class TestSandboxDurableTrees:
+    """The user trees a persistent Docker sandbox bind-mounts (#143104).
+
+    ``terminal.container_persistent`` bind-mounts ``$HERMES_HOME/sandboxes/docker/<profile>/
+    {workspace,home}`` as ``/workspace`` and ``/root``. Those are the durable trees the docs tell
+    the agent to write deliverables into, and they are the same ``workspace``/``home`` names the
+    top-level check already protects — one directory deeper than it looks, so a ``test_*`` written
+    there was tracked as disposable and deleted when the session ended.
+    """
+
+    @pytest.mark.parametrize("relative", [
+        ("sandboxes", "docker", "default", "workspace", "dataset", "test_validator.py"),
+        ("sandboxes", "docker", "default", "home", "tmp_manifest.json"),
+        # A profile name is not part of the shape: the durable segment is what matters.
+        ("sandboxes", "docker", "work", "workspace", "test_harness.py"),
+        # Another backend mirrors the same trees.
+        ("sandboxes", "podman", "default", "home", "test_env.py"),
+    ])
+    def test_a_test_file_in_the_sandbox_is_not_disposable(self, _isolate_env, relative):
+        dg = _load_lib()
+        p = _isolate_env.joinpath(*relative)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text("x")
+        assert dg.guess_category(p) is None
+
+    def test_the_rest_of_the_sandbox_stays_sweepable(self, _isolate_env):
+        """The control: a ``test_*`` outside the bind-mounted trees is still scratch."""
+        dg = _load_lib()
+        p = _isolate_env / "sandboxes" / "docker" / "default" / "cache" / "test_blob.py"
+        p.parent.mkdir(parents=True)
+        p.write_text("x")
+        assert dg.guess_category(p) == "test"
+
+    def test_quick_leaves_a_stored_sandbox_entry_alone(self, _isolate_env):
+        """A path tracked by an older build is re-validated through the same rule."""
+        dg = _load_lib()
+        p = _isolate_env / "sandboxes" / "docker" / "default" / "workspace" / "test_keep.py"
+        p.parent.mkdir(parents=True)
+        p.write_text("x")
+        assert dg.track(str(p), "test", silent=True) is True
+        assert dg.quick()["deleted"] == 0
+        assert p.exists() is True
