@@ -96,6 +96,43 @@ def _scrub(text: str) -> str:
 _TOKEN_RE = re.compile(r"[A-Za-z0-9_\-./+]{16,}")
 
 
+def _mask_learned_literals(text: str, literals: list[str]) -> str:
+    """Mask every learned literal with the leftmost, longest-at-that-position rule the alternation
+    regex applied, without compiling a pattern whose size is proportional to the literals (#143111).
+
+    A learned literal is as long as the value the scrub removed, so a transcript holding a 64 KiB
+    credential handed ``re.compile`` a 64 KiB alternation: a parser node sequence per byte, a
+    multi-megabyte temporary tree and a round of collections, for a match one ``str.find`` answers.
+    Literals arrive longest-first and the scan keeps that preference at the same position, so the
+    masked result is the one the regex produced; a text carrying none of them comes back as itself.
+    """
+    if not literals:
+        return text
+    literals = [literal for literal in literals if literal]  # an empty one would match at every offset
+    if not literals:
+        return text
+    pieces: list[str] = []
+    pos, end = 0, len(text)
+    while pos < end:
+        at, width = -1, 0
+        for literal in literals:
+            found = text.find(literal, pos)
+            if found < 0:
+                continue
+            if at < 0 or found < at or (found == at and len(literal) > width):
+                at, width = found, len(literal)
+        if at < 0:
+            break
+        pieces.append(text[pos:at])
+        pieces.append("[redacted]")
+        pos = at + width
+    if not pieces:
+        return text
+    pieces.append(text[pos:])
+    return "".join(pieces)
+
+
+
 def _redact_for_provider(*values: Any) -> Any:
     """Copies of ``values`` with every string scrubbed before it reaches a memory provider.
 
@@ -130,8 +167,8 @@ def _redact_for_provider(*values: Any) -> Any:
 
     scrubbed = [walk(v, scrub) for v in values]
     if learned:
-        pattern = re.compile("|".join(re.escape(t) for t in sorted(learned, key=len, reverse=True)))
-        scrubbed = [walk(v, lambda t: pattern.sub("[redacted]", t) if pattern.search(t) else t) for v in scrubbed]
+        literals = sorted(learned, key=len, reverse=True)
+        scrubbed = [walk(v, lambda t: _mask_learned_literals(t, literals)) for v in scrubbed]
     return scrubbed[0] if len(scrubbed) == 1 else tuple(scrubbed)
 
 
