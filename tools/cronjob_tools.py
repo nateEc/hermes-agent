@@ -763,7 +763,7 @@ def _estop_refusal_for_manual_run() -> Optional[str]:
     """
     try:
         from agent import estop
-    except Exception:  # pragma: no cover - estop ships with the agent
+    except ImportError:  # pragma: no cover - estop ships with the agent
         return None
     if not estop.check_paused("cron-run", logger):
         return None
