@@ -78,10 +78,19 @@ def _happy_eyeballs_create_connection(address: tuple[str, int], timeout: float |
         candidate = socket.socket(family, socktype, proto)
         try:
             if source_address is not None:
-                local_infos = socket.getaddrinfo(source_address[0], source_address[1], family=family, type=socktype)
-                if not local_infos:
-                    raise OSError(f"getaddrinfo returned no local {family} address for {source_address[0]}")
-                candidate.bind(local_infos[0][4])
+                local_host, local_port = source_address
+                if local_host:
+                    local_infos = socket.getaddrinfo(local_host, local_port, family=family, type=socktype)
+                    if not local_infos:
+                        raise OSError(f"getaddrinfo returned no local {family} address for {local_host}")
+                    candidate.bind(local_infos[0][4])
+                else:
+                    # ``""``/``None`` is the unspecified source host, not a name to look up: the
+                    # serial stdlib path just binds it, and the wildcard it means is per family.
+                    # Resolving it instead fails a paho connect twice over — glibc raises
+                    # gaierror(-2) on getaddrinfo("") and macOS answers 127.0.0.1, which binds
+                    # the source to loopback and makes every non-loopback connect fail.
+                    candidate.bind(("", local_port or 0))
             candidate.setblocking(False)
             result = candidate.connect_ex(sockaddr)
             if result in (0, errno.EISCONN):

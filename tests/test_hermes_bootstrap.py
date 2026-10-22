@@ -570,6 +570,51 @@ class TestHappyEyeballsSocketConnect:
         assert clock[0] == hb._HAPPY_EYEBALLS_DELAY_SECONDS
         assert sockets[0].closed is True and sockets[1] is winner
 
+    def test_empty_source_host_binds_the_wildcard_instead_of_being_resolved(self, monkeypatch):
+        """``source_address=("", 0)`` is what paho always passes: ``""`` is the unspecified host,
+        not a name to look up (#142908). Resolving it kills the connect before a packet leaves
+        the machine — glibc answers ``gaierror(-2)`` for ``getaddrinfo("")`` and macOS answers
+        ``127.0.0.1``, which binds the source to loopback — while the serial stdlib path just
+        binds the tuple and lets the family pick its wildcard."""
+        hb = _fresh_import()
+        binds: list[tuple] = []
+
+        class FakeSocket:
+            def __init__(self, family, socktype, proto):
+                self.family = family
+                self.closed = False
+
+            def bind(self, address):
+                binds.append(address)
+
+            def setblocking(self, _blocking):
+                pass
+
+            def connect_ex(self, _address):
+                return 0
+
+            def settimeout(self, _timeout):
+                pass
+
+            def setsockopt(self, *_args):
+                pass
+
+            def close(self):
+                self.closed = True
+
+        def fake_getaddrinfo(host, port, *_args, **_kwargs):
+            if host == "":
+                raise socket.gaierror(-2, "Name or service not known")
+            return [(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", (host, port))]
+
+        monkeypatch.setattr(hb.socket, "getaddrinfo", fake_getaddrinfo)
+        monkeypatch.setattr(hb.socket, "socket", FakeSocket)
+
+        winner = socket.create_connection(("192.0.2.1", 8883), 5.0, ("", 0))
+
+        assert winner.family == socket.AF_INET
+        assert binds == [("", 0)]  # the wildcard of the chosen family, never a resolved host
+
     def test_racer_bug_raises_instead_of_falling_back_to_the_serial_walk(self, monkeypatch):
         """A non-OSError from the racer is a bug in the racer, not a network outcome: it must
         surface, never silently reroute the connect through the serial stock walker (which
