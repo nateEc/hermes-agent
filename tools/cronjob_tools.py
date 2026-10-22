@@ -750,8 +750,38 @@ def _refreshed_job_view(job_id: str) -> dict[str, Any]:
     return _format_job(get_job(job_id) or {"id": job_id})
 
 
+def _estop_refusal_for_manual_run() -> Optional[str]:
+    """Refuse a manual fire while the global emergency stop is engaged (#142820).
+
+    ``tick()`` returns 0 before it even scans due jobs, so a scheduled fire never
+    starts under ESTOP; the manual path claimed the job and fired it immediately,
+    spending tokens on an operator who had just asked for new work to hold.
+    ``check_paused`` logs once per engagement with the sentinel path, and the
+    ``is_engaged`` inside it already treats a corrupt/empty sentinel as engaged
+    (fail safe). The import fails open: an estop module that cannot load must not
+    swallow a manual run.
+    """
+    try:
+        from agent import estop
+    except Exception:  # pragma: no cover - estop ships with the agent
+        return None
+    if not estop.check_paused("cron-run", logger):
+        return None
+    return tool_error(
+        "The global emergency stop is engaged; this manual run is refused and the job "
+        f"was not started. It lifts when `hermes resume` removes {estop.sentinel_path()} "
+        "— in-flight runs are never touched.",
+        success=False,
+    )
+
+
 def _action_run(job: dict[str, Any], a: dict[str, Any]) -> str:
     job_id = job["id"]
+    # `hermes pause` halts NEW work only, and a manual fire is new work: refuse it
+    # here, before the claim, so a paused operator's job is left exactly as it was.
+    estop_refusal = _estop_refusal_for_manual_run()
+    if estop_refusal is not None:
+        return estop_refusal
     # `prompt` on run is transient per-fire context appended to the stored prompt, never
     # persisted; same strict scan as stored prompts.
     extra_prompt = a["prompt"] or None
