@@ -1,8 +1,6 @@
 """Tests for profile-scoped AGENT_BROWSER_EXECUTABLE_PATH resolution in routed profiles (#143170)."""
 
 import os
-import pm
-import pytest
 
 from agent.secret_scope import (
     get_secret,
@@ -16,19 +14,7 @@ from tools.browser_tool import _build_browser_env
 from tools.browser_tool_session import _agent_browser_command_env
 from tools.browser_use_cli import _base_subprocess_env
 
-
-@pytest.fixture(autouse=True)
-def _cleanup_scope():
-    """Ensure multiplex context and secret scope are cleaned up after each test."""
-    yield
-    try:
-        set_multiplex_context(False)
-    except Exception:
-        pass
-    try:
-        set_secret_scope(None)
-    except Exception:
-        pass
+pytest_plugins = ["tests.tools.test_browser_pm"]
 
 
 def test_scoped_browser_executable_path_honored_in_routed_profile(tmp_path, monkeypatch):
@@ -124,3 +110,41 @@ def test_single_profile_unrouted_honors_environ(tmp_path, monkeypatch):
     socket_dir = str(tmp_path / "probe-socket")
     cmd_env = _agent_browser_command_env(socket_dir)
     assert cmd_env.get("AGENT_BROWSER_EXECUTABLE_PATH") == single_chrome
+
+
+def test_profile_files_round_trip_a_b_a_after_pm_composition(browser_store, tmp_path, monkeypatch):
+    """The actual gateway binder reads each home's .env; PM must not restamp its renderer."""
+    from gateway.run import _profile_runtime_scope
+
+    _, _, publish = browser_store
+    managed = str(publish("chromium"))
+    launch = str(tmp_path / "launch-renderer")
+    monkeypatch.setenv("AGENT_BROWSER_EXECUTABLE_PATH", launch)
+    homes = {}
+    for name in ("a", "b"):
+        home = tmp_path / name
+        home.mkdir()
+        (home / "config.yaml").write_text("model:\n  default: fixture\n", encoding="utf-8")
+        renderer = str(home / "owned-renderer")
+        (home / ".env").write_text(f"AGENT_BROWSER_EXECUTABLE_PATH={renderer}\n", encoding="utf-8")
+        homes[name] = (home, renderer)
+
+    multiplex = set_multiplex_context(True)
+    try:
+        for name in ("a", "b", "a"):
+            home, renderer = homes[name]
+            with _profile_runtime_scope(home):
+                assert chromium_executable() == renderer
+                assert _build_browser_env()["AGENT_BROWSER_EXECUTABLE_PATH"] == renderer
+                assert _base_subprocess_env()["AGENT_BROWSER_EXECUTABLE_PATH"] == renderer
+                assert _agent_browser_command_env(str(home / "socket"))["AGENT_BROWSER_EXECUTABLE_PATH"] == renderer
+            assert os.environ["AGENT_BROWSER_EXECUTABLE_PATH"] == launch
+
+        home, _ = homes["b"]
+        (home / ".env").write_text("", encoding="utf-8")
+        with _profile_runtime_scope(home):
+            assert "AGENT_BROWSER_EXECUTABLE_PATH" not in _build_browser_env()
+            assert "AGENT_BROWSER_EXECUTABLE_PATH" not in _base_subprocess_env()
+            assert _agent_browser_command_env(str(home / "socket"))["AGENT_BROWSER_EXECUTABLE_PATH"] == managed
+    finally:
+        reset_multiplex_context(multiplex)

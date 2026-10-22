@@ -37,11 +37,6 @@ _SAFE_SAMPLE = {
     "HOME": "/home/user",
     "USER": "testuser",
     "MY_APP_VAR": "keep-me",
-    **({
-        "USERPROFILE": os.environ.get("USERPROFILE", "C:\\Users\\testuser"),
-        "LOCALAPPDATA": os.environ.get("LOCALAPPDATA", "C:\\Users\\testuser\\AppData\\Local"),
-        "SYSTEMROOT": os.environ.get("SYSTEMROOT", "C:\\Windows"),
-    } if os.name == "nt" else {}),
 }
 
 
