@@ -1,92 +1,77 @@
-"""`hermes cron run` must refuse while the global emergency stop is engaged (#142820).
-
-``tick()`` returns 0 before it even scans due jobs, so no *scheduled* fire starts
-under `hermes pause`. The manual path was the hole: ``cronjob(action="run")`` —
-which is exactly what ``hermes cron run`` calls — claimed the job and fired it
-immediately, with no ``agent.estop`` check anywhere in the chain. A manual run
-during an emergency stop starts an agent and spends tokens on an operator who
-just asked for new work to hold.
-
-In-flight work is never touched: only a run that has not been claimed yet is
-refused, and the job is left exactly as it was.
-"""
+"""Manual-run admission must honor real profile/fleet ESTOP files before touching a cron claim."""
 
 import json
-from unittest.mock import patch
+from functools import partial
+from pathlib import Path
 
 import pytest
 
 from agent import estop
-from tools.cronjob_tools import cronjob
-
-_JOB = {"id": "job-estop-1", "name": "nightly", "prompt": "hi",
-        "schedule": {"kind": "cron", "expr": "0 9 * * *"}}
+from cron import jobs
+from tools import cronjob_tools
 
 
 @pytest.fixture
-def hermes_home(tmp_path, monkeypatch):
-    """Pin both candidate sentinel paths (profile home + fleet root) at tmp_path."""
-    monkeypatch.setattr(estop, "sentinel_path", lambda: tmp_path / "ESTOP")
-    monkeypatch.setattr(estop, "_canonical_root", lambda: tmp_path)
+def manual_job(tmp_path, monkeypatch):
+    root = tmp_path / ".hermes"
+    home = root / "profiles" / "worker"
+    home.mkdir(parents=True)
+    (root / "config.yaml").write_text("{}", encoding="utf-8")
+    (home / "config.yaml").write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.setenv("HERMES_HOME", str(home))
     estop._logged_components.clear()
-    return tmp_path
+    assert set(estop._candidate_sentinel_paths()) == {home / "ESTOP", root / "ESTOP"}
+    events = []
 
+    def observe(name, *_args, **_kwargs):
+        events.append(name)
 
-def _manual_run(action="run"):
-    """Drive the tool's run action with the claim + fire bodies under mocks."""
-    claimed = {**_JOB, "fire_claim": {"by": "manual-owner"}}
-    with patch("tools.cronjob_tools.resolve_job_ref", return_value=dict(_JOB)), \
-         patch("tools.cronjob_tools.claim_job_for_fire", return_value=claimed) as m_claim, \
-         patch("cron.scheduler.run_one_job", return_value=True) as m_run, \
-         patch("tools.cronjob_tools.get_job", return_value=dict(_JOB)):
-        out = json.loads(cronjob(action=action, job_id="job-estop-1"))
-    return out, m_claim, m_run
+    for name in ("_hand_off_primary_routed_run", "_try_dispatch_background_run", "_forward_relay_fronted_run"):
+        monkeypatch.setattr(cronjob_tools, name, partial(observe, name))
 
+    def run_claimed(job, **_kwargs):
+        events.append(("run", job))
+        return {"claimed": True, "success": True}
 
-def test_manual_run_refused_while_engaged(hermes_home):
-    estop.engage(reason="deploy window")
-
-    out, m_claim, m_run = _manual_run()
-
-    assert out["success"] is False
-    assert "emergency stop" in out["error"].lower()
-    # The operator needs the way out, not just the refusal.
-    assert "hermes resume" in out["error"]
-    assert str(hermes_home / "ESTOP") in out["error"]
-    m_claim.assert_not_called()
-    m_run.assert_not_called()
+    monkeypatch.setattr(cronjob_tools, "_run_claimed_job", run_claimed)
+    monkeypatch.setattr(cronjob_tools, "_notify_provider_jobs_changed_safe", partial(observe, "notify"))
+    with jobs.use_cron_store(home):
+        job = jobs.create_job(prompt="Summarize local notes", schedule="every 1h", deliver="local")
+        yield home, root, job, events
 
 
 @pytest.mark.parametrize("action", ["run", "run_now", "trigger"])
-def test_every_run_alias_is_refused(action, hermes_home):
-    """`run`, `run_now` and `trigger` are one handler: none may leak a fire."""
-    estop.engage()
-
-    out, m_claim, m_run = _manual_run(action=action)
-
-    assert out["success"] is False
-    m_claim.assert_not_called()
-    m_run.assert_not_called()
-
-
-def test_corrupt_sentinel_still_refuses(hermes_home):
-    """A hand-touched/empty ESTOP file is engaged too (fail safe, as in tick())."""
-    (hermes_home / "ESTOP").write_text("not json", encoding="utf-8")
-
-    out, m_claim, _ = _manual_run()
-
-    assert out["success"] is False
-    m_claim.assert_not_called()
+@pytest.mark.parametrize("location", ["profile", "fleet"])
+@pytest.mark.parametrize("body", ["", "not json", '{"reason": "maintenance"}'])
+def test_estop_refuses_all_manual_aliases_before_any_dispatch_or_store_change(manual_job, action, location, body):
+    home, root, job, events = manual_job
+    sentinel = (home if location == "profile" else root) / "ESTOP"
+    sentinel.write_text(body, encoding="utf-8")
+    before = jobs.get_job(job["id"])
+    store_before = (home / "cron" / "jobs.json").read_bytes()
+    output = json.loads(cronjob_tools.cronjob(action=action, job_id=job["id"]))
+    assert output["success"] is False
+    assert "emergency stop" in output["error"].lower() and "hermes resume" in output["error"]
+    assert str(home / "ESTOP") in output["error"]
+    assert events == []
+    assert jobs.get_job(job["id"]) == before
+    assert (home / "cron" / "jobs.json").read_bytes() == store_before
 
 
-def test_manual_run_proceeds_after_resume(hermes_home):
-    """Control: with the sentinel gone the claim and fire happen exactly as before."""
-    estop.engage()
-    estop.disengage()
-
-    out, m_claim, m_run = _manual_run()
-
-    assert out["success"] is True
-    assert out["job"]["executed"] is True
-    m_claim.assert_called_once_with("job-estop-1", manual=True, return_job=True)
-    m_run.assert_called_once()
+@pytest.mark.parametrize("action", ["run", "run_now", "trigger"])
+@pytest.mark.parametrize("resumed", [False, True])
+def test_unpaused_or_resumed_manual_runs_still_claim_through_the_real_store(manual_job, action, resumed):
+    _home, root, job, events = manual_job
+    if resumed:
+        estop.engage(reason="maintenance")
+        (root / "ESTOP").write_text("", encoding="utf-8")
+        assert estop.disengage()
+    assert not estop.is_engaged()
+    output = json.loads(cronjob_tools.cronjob(action=action, job_id=job["id"]))
+    assert output["success"] is True and output["job"]["executed"] is True
+    run = [event[1] for event in events if isinstance(event, tuple)]
+    assert len(run) == 1 and run[0]["id"] == job["id"]
+    stored = jobs.get_job(job["id"])
+    assert stored["fire_claim"] == run[0]["fire_claim"]
+    assert stored["next_run_at"] != job["next_run_at"] or stored.get("manual_run_at")

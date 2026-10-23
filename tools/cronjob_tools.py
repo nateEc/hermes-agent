@@ -751,16 +751,7 @@ def _refreshed_job_view(job_id: str) -> dict[str, Any]:
 
 
 def _estop_refusal_for_manual_run() -> Optional[str]:
-    """Refuse a manual fire while the global emergency stop is engaged (#142820).
-
-    ``tick()`` returns 0 before it even scans due jobs, so a scheduled fire never
-    starts under ESTOP; the manual path claimed the job and fired it immediately,
-    spending tokens on an operator who had just asked for new work to hold.
-    ``check_paused`` logs once per engagement with the sentinel path, and the
-    ``is_engaged`` inside it already treats a corrupt/empty sentinel as engaged
-    (fail safe). The import fails open: an estop module that cannot load must not
-    swallow a manual run.
-    """
+    """Apply the ticker's ESTOP admission rule before any manual claim or dispatch (#142820)."""
     try:
         from agent import estop
     except ImportError:  # pragma: no cover - estop ships with the agent
@@ -769,8 +760,8 @@ def _estop_refusal_for_manual_run() -> Optional[str]:
         return None
     return tool_error(
         "The global emergency stop is engaged; this manual run is refused and the job "
-        f"was not started. It lifts when `hermes resume` removes {estop.sentinel_path()} "
-        "— in-flight runs are never touched.",
+        "was not started. Run `hermes resume` to clear the profile/fleet ESTOP sentinels "
+        f"(profile path: {estop.sentinel_path()}). In-flight runs are never touched.",
         success=False,
     )
 
