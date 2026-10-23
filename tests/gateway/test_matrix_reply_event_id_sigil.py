@@ -1,85 +1,75 @@
-"""Outbound Matrix reply relations only carry real Matrix event ids.
-
-Desktop-originated turns hand the adapter the session store's internal message
-UID (bare 32-char hex, no ``$`` sigil). ``_apply_relation_metadata`` embedded it
-verbatim into ``m.relates_to.m.in_reply_to.event_id``, and rust-sdk clients
-(Element X) refuse to parse the whole ``m.room.message`` event over the
-malformed identifier — the reply text is lost on those clients (#143137).
-Only ``$``-sigiled event ids may ride the wire; anything else drops the reply
-decoration (cosmetic) instead of the message. Mirrors the sigil guard the Moca
-client added on its side for the same class of bad ``in_reply_to`` ids.
-"""
+"""Desktop UIDs must not corrupt Matrix reply relations on text or local-media sends (#143137)."""
 
 import asyncio
-from unittest.mock import MagicMock
+import copy
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
+
+import pytest
 
 from gateway.config import PlatformConfig
+from plugins.platforms.matrix.adapter import MatrixAdapter
 
 
-def _make_adapter():
-    """Create a MatrixAdapter with mocked config (no live client)."""
-    from plugins.platforms.matrix.adapter import MatrixAdapter
-
-    config = PlatformConfig(
-        enabled=True,
-        token="syt_test_token",
-        extra={
-            "homeserver": "https://matrix.example.org",
-            "user_id": "@hermes:example.org",
-        },
+async def _send_case(tmp_path, kind, reply_to, thread_id):
+    adapter = MatrixAdapter(PlatformConfig(enabled=True, extra={
+        "homeserver": "https://matrix.example.org", "user_id": "@hermes:example.org",
+        "e2ee_mode": "off", "max_message_length": 100,
+    }))
+    adapter._client = SimpleNamespace(
+        send_message_event=AsyncMock(return_value="$sent_event"),
+        upload_media=AsyncMock(return_value="mxc://example.org/synthetic"), crypto=None,
     )
-    adapter = MatrixAdapter(config)
-    adapter._client = MagicMock()  # truthy: a client is connected
-    return adapter
+    metadata = {"thread_id": thread_id, "ordinary": "unchanged"} if thread_id else {"ordinary": "unchanged"}
+    before = copy.deepcopy(metadata)
+    if kind == "text":
+        result = await adapter.send("!room:example.org", "hello Matrix " * 40, reply_to, metadata)
+    else:
+        suffix = {"image": ".png", "document": ".txt", "audio": ".wav", "video": ".webm"}[kind]
+        file = tmp_path / ("attachment" + suffix)
+        file.write_bytes(b"synthetic media contents")
+        send = {"image": adapter.send_image_file, "document": adapter.send_document,
+                "audio": adapter.send_voice, "video": adapter.send_video}[kind]
+        options = {"is_voice": False} if kind == "audio" else {}
+        result = await send("!room:example.org", str(file), caption="hello Matrix", reply_to=reply_to,
+                            metadata=metadata, **options)
+        assert file.read_bytes() == b"synthetic media contents"
+        adapter._client.upload_media.assert_awaited_once()
+    assert result.success and result.message_id == "$sent_event"
+    assert metadata == before
+    calls = adapter._client.send_message_event.await_args_list
+    assert len(calls) > 1 if kind == "text" else len(calls) == 1
+    payloads = [call.args[2] for call in calls]
+    assert all(payload["body"] for payload in payloads)
+    if kind != "text":
+        assert payloads[0]["body"] == "hello Matrix"
+        assert payloads[0]["url"] == "mxc://example.org/synthetic"
+    return payloads
 
 
-def _sent_content(adapter, *, reply_to=None, metadata=None):
-    """Run one outbound send and return the m.room.message content it built."""
-    captured = {}
+@pytest.mark.parametrize("kind", ["text", "image", "document", "audio", "video"])
+@pytest.mark.parametrize("thread_id", [None, "$thread_root:example.org"])
+@pytest.mark.parametrize("reply_to", ["a51ff6d975da4faa9d447277d9fc439a", "@not-an-event:example.org", "", None])
+def test_non_event_targets_drop_only_the_reply_decoration(tmp_path, kind, thread_id, reply_to):
+    payloads = asyncio.run(_send_case(tmp_path, kind, reply_to, thread_id))
+    for payload in payloads:
+        if thread_id:
+            relation = payload["m.relates_to"]
+            assert relation == {"rel_type": "m.thread", "event_id": thread_id, "is_falling_back": True,
+                                "m.in_reply_to": {"event_id": thread_id}}
+        else:
+            assert "m.relates_to" not in payload
 
-    async def _fake_send(room_id, msg_content):
-        captured.update(msg_content)
-        return "$sent_evt"
 
-    adapter._send_room_message = _fake_send
-    asyncio.run(adapter.send("!room1:example.org", "hello", reply_to=reply_to, metadata=metadata))
-    return captured
-
-
-class TestReplyEventIdSigil:
-    """``m.in_reply_to`` never embeds a non-Matrix identifier."""
-
-    def test_matrix_event_id_reply_is_embedded(self):
-        adapter = _make_adapter()
-        content = _sent_content(adapter, reply_to="$real_evt")
-        assert content["m.relates_to"]["m.in_reply_to"]["event_id"] == "$real_evt"
-
-    def test_internal_message_uid_reply_is_not_embedded(self):
-        adapter = _make_adapter()
-        content = _sent_content(adapter, reply_to="a51ff6d975da4faa9d447297d9fc439a")
-        assert "m.relates_to" not in content
-
-    def test_empty_reply_to_stays_absent(self):
-        adapter = _make_adapter()
-        content = _sent_content(adapter, reply_to="")
-        assert "m.relates_to" not in content
-
-    def test_thread_fallback_uses_thread_root_when_reply_is_uid(self):
-        adapter = _make_adapter()
-        content = _sent_content(
-            adapter,
-            reply_to="be881dfef2c041c2b90816127fea365d",
-            metadata={"thread_id": "$root_evt"},
-        )
-        relates_to = content["m.relates_to"]
-        assert relates_to["rel_type"] == "m.thread"
-        assert relates_to["event_id"] == "$root_evt"
-        # The reply fallback defaults to the thread root, not the internal UID.
-        assert relates_to["m.in_reply_to"]["event_id"] == "$root_evt"
-
-    def test_thread_with_valid_reply_keeps_the_reply_target(self):
-        adapter = _make_adapter()
-        content = _sent_content(adapter, reply_to="$real_evt", metadata={"thread_id": "$root_evt"})
-        relates_to = content["m.relates_to"]
-        assert relates_to["m.in_reply_to"]["event_id"] == "$real_evt"
-        assert relates_to["event_id"] == "$root_evt"
+@pytest.mark.parametrize("kind", ["text", "image", "document", "audio", "video"])
+@pytest.mark.parametrize("thread_id", [None, "$thread_root:example.org"])
+@pytest.mark.parametrize("reply_to", ["$legacy:example.org", "$opaque/plus+event", "$url_safe-event_id"])
+def test_valid_opaque_event_targets_are_preserved_on_every_send_path(tmp_path, kind, thread_id, reply_to):
+    payloads = asyncio.run(_send_case(tmp_path, kind, reply_to, thread_id))
+    for payload in payloads:
+        relation = payload["m.relates_to"]
+        assert relation["m.in_reply_to"]["event_id"] == reply_to
+        if thread_id:
+            assert relation["event_id"] == thread_id and relation["rel_type"] == "m.thread"
+        else:
+            assert set(relation) == {"m.in_reply_to"}
