@@ -562,6 +562,7 @@ class MattermostAdapter(BasePlatformAdapter):
             return
         channel_id, is_dm = post.get("channel_id", ""), data.get("channel_type", "O") == "D"
         message_text = post.get("message", "")
+        reply_expected = self._reply_expected(post, is_dm=is_dm)
         if not is_dm:  # DMs need no gating; channels are mention-gated.
             message_text = self._apply_channel_gating(channel_id, message_text)
             if message_text is None:
@@ -588,7 +589,23 @@ class MattermostAdapter(BasePlatformAdapter):
         await self.handle_message(MessageEvent(
             text=message_text, message_type=msg_type, source=source, raw_message=post, message_id=post_id,
             media_urls=media_urls, media_types=media_types,
+            reply_expected=True if msg_type == MessageType.COMMAND else reply_expected,
             channel_prompt=resolve_channel_prompt(self.config.extra, channel_id, None)))
+
+    def _reply_expected(self, post: dict[str, Any], *, is_dm: bool) -> Optional[bool]:
+        """Keep plain conversation follow-ups protected, but allow unaddressed channel chatter to end silently."""
+        text = post.get("message", "")
+        names = [re.escape(name) for name in (self._bot_username, self._bot_user_id) if name]
+        if is_dm or (names and re.search(r"(?<![\w@])@(?:" + "|".join(names) + r")(?![\w.-])", text, re.IGNORECASE)):
+            return True
+        # Mattermost stamps from_bot="true" on bot posts. It is a silence hint, not authorization.
+        props = post.get("props")
+        from_bot = isinstance(props, dict) and str(props.get("from_bot", "")).lower() == "true"
+        if from_bot or re.match(r"\s*@[\w.-]+", text):
+            return False
+        # Like Slack, only an unaddressed new thread may go silent; an ordinary "done?" in an
+        # existing thread (or flat channel conversation) keeps #110952's visible fallback.
+        return False if self._reply_mode == "thread" and not post.get("root_id") else None
 
 
 # --- Plugin standalone-send (out-of-process cron delivery via Mattermost REST) ---

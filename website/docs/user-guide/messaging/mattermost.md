@@ -21,6 +21,11 @@ Before setup, here's the part most people want to know: how Hermes behaves once 
 | **Threads** | If `MATTERMOST_REPLY_MODE=thread`, Hermes replies in a thread under your message. Thread context stays isolated from the parent channel. |
 | **Shared channels with multiple users** | By default, Hermes isolates session history per user inside the channel. Two people talking in the same channel do not share one transcript unless you explicitly disable that. |
 
+When channel policy admits unmentioned posts, a bare `NO_REPLY` may stay silent for a new
+thread, a post addressed to another user, or an unaddressed bot post. DMs, commands, mentions
+of Hermes, and ordinary follow-ups in an existing thread or flat channel keep the visible
+fallback if the model returns only a silence marker. This does not change which posts are admitted.
+
 :::tip
 If you want Hermes to reply as threaded conversations (nested under your original message), set `MATTERMOST_REPLY_MODE=thread`. The default is `off`, which sends flat messages in the channel.
 :::
