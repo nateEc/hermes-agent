@@ -406,6 +406,8 @@ class GatewayAgent:
         self._apply_info(state.info)
         if state.usage:
             self.apply_session_usage(state.usage)
+        # Main reuses this viewer on rotation without reinstalling its reasoning sink.
+        self.reasoning_callback = self._reasoning_callback
 
     # -- reasoning display -------------------------------------------------------------------
     @property
