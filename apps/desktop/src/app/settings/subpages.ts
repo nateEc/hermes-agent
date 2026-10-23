@@ -33,7 +33,7 @@ import {
 import { APPEARANCE_SUBPAGES } from './appearance-subpages'
 import { CONFIG_SUBPAGES, configSubpageForField } from './config-subpages'
 import { OTHER_SUBPAGES } from './other-subpages'
-import { settingDefinition } from './settings-manifest'
+import { SETTING_IDS, settingDefinition } from './settings-manifest'
 import type { SettingsView } from './types'
 
 export interface SettingsSubpage {
@@ -102,7 +102,13 @@ export function settingsSubpages(view: SettingsView): readonly SettingsSubpage[]
     return CONFIG_SUBPAGES[view.slice('config:'.length)] ?? []
   }
 
-  return OTHER_SUBPAGES[view] ?? []
+  const pages = OTHER_SUBPAGES[view] ?? []
+
+  if (view === 'keybinds' && settingDefinition(view, SETTING_IDS.keybinds.screenshot)?.available?.() === false) {
+    return pages.filter(page => page.id !== 'screen-capture')
+  }
+
+  return pages
 }
 
 /** Shared by search serialization and saved links that predate subpages. */

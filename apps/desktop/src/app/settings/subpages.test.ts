@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { TRANSLATIONS } from '@/i18n'
 
@@ -22,7 +22,26 @@ const views: SettingsView[] = [
   ...(Object.keys(OTHER_SUBPAGES) as SettingsView[])
 ]
 
+afterEach(() => vi.unstubAllGlobals())
+
 describe('settings subpage routing', () => {
+  it.each([
+    { bridge: undefined, available: false },
+    { bridge: {}, available: false },
+    { bridge: { screenshot: {} }, available: true }
+  ])('keeps screen-capture navigation and deep links aligned with native availability: $available', ({ bridge, available }) => {
+    vi.stubGlobal('hermesDesktop', bridge)
+    const id = SETTING_IDS.keybinds.screenshot
+    const definition = settingDefinition('keybinds', id)!
+    const pages = settingsSubpages('keybinds')
+    expect(pages.some(page => page.id === definition.subpage)).toBe(available)
+    expect(settingSearchTargets(TRANSLATIONS.en).some(target => target.id === id)).toBe(available)
+
+    for (const query of [new URLSearchParams({ page: definition.subpage! }), new URLSearchParams({ setting: id })]) {
+      expect(resolveSettingsSubpage('keybinds', query)).toBe(available ? definition.subpage : pages[0].id)
+    }
+  })
+
   it('opens the first ordered child for parents and keeps explicit child destinations', () => {
     for (const view of views) {
       const pages = settingsSubpages(view)
@@ -100,7 +119,7 @@ describe('settings subpage routing', () => {
         expect(settingDefinition(view, id)).toBe(setting)
         expect(setting.keywords.length).toBeGreaterThan(0)
 
-        if (setting.subpage) {
+        if (setting.subpage && (setting.available?.() ?? true)) {
           expect(subpages).toContain(setting.subpage)
           expect(
             resolveSettingsSubpage(view, new URLSearchParams(settingsSearchTargetQuery({ view, setting: id })))
