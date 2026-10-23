@@ -5,12 +5,21 @@ from __future__ import annotations
 
 import logging
 import threading
+from contextvars import ContextVar
 from typing import Optional
 
 from agent.proxy_bypass import loopback_request_kwargs
 from agent.redact import redact_cdp_url
 
 logger = logging.getLogger(__name__)
+
+_last_discovery_failure: ContextVar[Optional[tuple[str, str]]] = ContextVar("cdp_discovery_failure", default=None)
+
+
+def last_cdp_discovery_failure(cdp_url: str) -> str:
+    """Sanitized failure for this task's current resolution of ``cdp_url``, or ""."""
+    failure = _last_discovery_failure.get()
+    return failure[1] if failure and failure[0] == (cdp_url or "").strip() else ""
 
 # Live ``/browser connect`` endpoints, one per profile home (``hermes_home_key()``): a multiplexed
 # gateway serves every profile from this process, so a process-wide value would reach them all.
@@ -27,6 +36,7 @@ def resolve_cdp_override(cdp_url: str) -> str:
     Full ``ws://.../devtools/browser/...`` endpoints pass through; HTTP discovery roots and bare
     ``ws://host:port`` resolve via ``/json/version`` → ``webSocketDebuggerUrl`` (falls back to the raw value).
     """
+    _last_discovery_failure.set(None)
     raw = (cdp_url or "").strip()
     if not raw:
         return ""
@@ -45,8 +55,10 @@ def resolve_cdp_override(cdp_url: str) -> str:
         response.raise_for_status()
         payload = response.json()
     except Exception as exc:  # health: allow BLE001 -- any discovery failure falls back to the raw endpoint
+        reason = redact_cdp_url(f"{type(exc).__name__}: {exc}")
         logger.warning("Failed to resolve CDP endpoint %s via %s: %s", redact_cdp_url(raw),
-                       redact_cdp_url(version_url), redact_cdp_url(str(exc)))
+                       redact_cdp_url(version_url), reason)
+        _last_discovery_failure.set((raw, reason))
         return raw
     ws_url = str(payload.get("webSocketDebuggerUrl") or "").strip()
     if ws_url:
@@ -54,6 +66,7 @@ def resolve_cdp_override(cdp_url: str) -> str:
         return ws_url
     logger.warning("CDP discovery at %s did not return webSocketDebuggerUrl; using raw endpoint",
                    redact_cdp_url(version_url))
+    _last_discovery_failure.set((raw, "discovery succeeded but the response had no webSocketDebuggerUrl"))
     return raw
 
 
