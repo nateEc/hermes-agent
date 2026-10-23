@@ -12,7 +12,8 @@ def _component_check_auth(
 ) -> bool:
     """Shared user-or-role OR authorization for component button clicks.
     Allow on: DISCORD/GATEWAY_ALLOW_ALL_USERS, user in DISCORD/GATEWAY_ALLOWED_USERS, a role in the
-    role allowlist, or pairing-store approval. Role allowlist with no ``roles`` (DM) rejects (fail closed).
+    role allowlist, or pairing-store approval. Missing/invalid ``roles`` (DM) cannot grant role access,
+    but must not veto the independent pairing grant.
     ``allowed_user_ids`` is the adapter's connect-time snapshot: a user (or ``*``) admitted only there is confirmed
     with ``live_auth`` (the gateway's per-call check), and an explicit False falls through to the role
     and pairing grants.
@@ -49,13 +50,10 @@ def _component_check_auth(
             return True
     if has_roles:
         roles_attr = getattr(user, "roles", None)
-        if roles_attr is None:
-            # Role policy configured but no role data (DM Member, raw User): fail closed.
-            return False
         try:
-            user_role_ids = {getattr(r, "id", None) for r in roles_attr}
+            user_role_ids = {getattr(r, "id", None) for r in (roles_attr or ())}
         except TypeError:
-            return False
+            user_role_ids = set()
         if user_role_ids & role_set:
             return True
     # Pairing store (mirrors ``authz_mixin._check_authorization``): paired users click without allowlist.
