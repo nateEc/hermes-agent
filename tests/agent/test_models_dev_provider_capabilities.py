@@ -21,8 +21,7 @@ def test_declared_capabilities_reach_every_consumer_and_user_override_wins(monke
 
     _isolated_registry(monkeypatch)
     overrides: dict = {}
-    # The vision probe now forwards the session config (image routing passes its cfg through),
-    # so the seam must answer the keyword form callers use — same registry, same result.
+    # Image routing forwards its frozen session config to the catalog.
     monkeypatch.setattr(models_dev, "_load_model_overrides", lambda *, config=None: overrides)
     monkeypatch.setattr("hermes_cli.inventory._reasoning_catalog_reader", lambda slug: None)
     declaration = {
