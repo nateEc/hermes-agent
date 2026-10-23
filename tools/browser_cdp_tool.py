@@ -308,7 +308,8 @@ def browser_cdp(method: str, params: Optional[dict[str, Any]] = None, target_id:
         from tools.browser_tool_cdp import last_cdp_discovery_failure
         discovery_failure = last_cdp_discovery_failure(endpoint)
         if discovery_failure:
-            return tool_error(f"CDP discovery for {endpoint!r} failed: {discovery_failure}. This is often transient "
+            from agent.redact import redact_cdp_url
+            return tool_error(f"CDP discovery for {redact_cdp_url(endpoint)!r} failed: {discovery_failure}. This is often transient "
                               "(timeout, connection refused, or HTTP error) and the browser may still be listening — "
                               "retry the call, and check network/firewall access to the debug port if it persists.",
                               method=method, cdp_docs=CDP_DOCS_URL)

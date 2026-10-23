@@ -3,6 +3,7 @@
 Split out of ``tools/browser_tool.py``. Facade-owned state is read through ``_bt`` (``tools.browser_tool``, resolved per call) — no import cycle."""
 
 import contextlib
+from contextvars import ContextVar
 import os
 import threading
 from typing import Optional, Tuple
@@ -11,16 +12,15 @@ from agent.proxy_bypass import loopback_request_kwargs
 from tools.browser_tool_origin import origin_module as _origin
 
 
-# Most recent ``/json/version`` discovery failure per raw endpoint (sanitized reason). ``browser_cdp`` surfaces it
-# so a transient timeout/refused reads as a discovery failure instead of a misconfigured non-WebSocket endpoint.
-_last_discovery_failure: dict[str, str] = {}
-_last_discovery_failure_lock = threading.Lock()
+# Keep only this task's last resolution: a process-wide endpoint map can retain
+# credentials indefinitely and report another profile's discovery failure.
+_last_discovery_failure: ContextVar[Optional[tuple[str, str]]] = ContextVar("cdp_discovery_failure", default=None)
 
 
 def last_cdp_discovery_failure(cdp_url: str) -> str:
-    """The sanitized reason the last ``/json/version`` discovery for ``cdp_url`` failed, or ""."""
-    with _last_discovery_failure_lock:
-        return _last_discovery_failure.get((cdp_url or "").strip(), "")
+    """Sanitized failure for this task's current resolution of ``cdp_url``, or ""."""
+    failure = _last_discovery_failure.get()
+    return failure[1] if failure and failure[0] == (cdp_url or "").strip() else ""
 
 
 def _resolve_cdp_override(cdp_url: str) -> str:
@@ -29,6 +29,7 @@ def _resolve_cdp_override(cdp_url: str) -> str:
     Full ``ws://.../devtools/browser/...`` endpoints pass through; HTTP discovery roots and bare ``ws://host:port``
     resolve via ``/json/version`` → ``webSocketDebuggerUrl`` (falls back to the raw value with a warning).
     """
+    _last_discovery_failure.set(None)
     _bt = _origin()
     raw = (cdp_url or "").strip()
     if not raw:
@@ -53,18 +54,14 @@ def _resolve_cdp_override(cdp_url: str) -> str:
     except Exception as exc:
         reason = san(f"{type(exc).__name__}: {exc}")
         _bt.logger.warning("Failed to resolve CDP endpoint %s via %s: %s", san(raw), san(version_url), reason)
-        with _last_discovery_failure_lock:
-            _last_discovery_failure[raw] = reason
+        _last_discovery_failure.set((raw, reason))
         return raw
     ws_url = str(payload.get("webSocketDebuggerUrl") or "").strip()
     if ws_url:
         _bt.logger.info("Resolved CDP endpoint %s -> %s", san(raw), san(ws_url))
-        with _last_discovery_failure_lock:
-            _last_discovery_failure.pop(raw, None)
         return ws_url
     _bt.logger.warning("CDP discovery at %s did not return webSocketDebuggerUrl; using raw endpoint", san(version_url))
-    with _last_discovery_failure_lock:
-        _last_discovery_failure[raw] = "discovery succeeded but the response had no webSocketDebuggerUrl"
+    _last_discovery_failure.set((raw, "discovery succeeded but the response had no webSocketDebuggerUrl"))
     return raw
 
 
