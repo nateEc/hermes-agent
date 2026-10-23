@@ -4074,12 +4074,10 @@ def _maybe_run_worktree_maintenance() -> None:
     git. Same pruner as ``hermes -w`` startup (idle dirty/unpushed trees archived before removal,
     live trees untouched). Throttled per profile home: a multiplexed tick runs once per served
     profile, and each must sweep its own registered repos under its own config. The thread runs in
-    a copy of the caller's context so the profile-home override travels with it. The sweeps share
-    repos, so ``cron.scheduler_worktree_maintenance`` serialises them and prunes each repo once.
+    a copy of the caller's context so the profile-home override travels with it. One daemon worker
+    drains the profile requests and prunes each shared repo once per interval.
     Errors never propagate: GC is hygiene, not scheduling."""
     global _last_worktree_maintenance_at
-    import contextvars
-
     from hermes_constants import get_hermes_home
 
     home = str(get_hermes_home())
@@ -4091,14 +4089,9 @@ def _maybe_run_worktree_maintenance() -> None:
             return
         _last_worktree_maintenance_at = {**stamps, home: now}
 
-    def _run() -> None:
-        from cron.scheduler_worktree_maintenance import run_sweep
-
-        run_sweep(_worktree_maintenance_repos,
+    from cron.scheduler_worktree_maintenance import enqueue_sweep
+    enqueue_sweep(home, _worktree_maintenance_repos,
                   interval_seconds=_WORKTREE_MAINTENANCE_INTERVAL_SECONDS)
-
-    threading.Thread(target=contextvars.copy_context().run, args=(_run,), name="cron-worktree-prune",
-                     daemon=True).start()
 
 
 def _acquire_tick_lock(lock_file):

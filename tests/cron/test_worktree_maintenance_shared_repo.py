@@ -1,142 +1,98 @@
-"""The cron tick's worktree prune must not fan its git work out with the profile count (#143255).
+"""Worktree hygiene is bounded per process, while each request retains its profile (#143255)."""
 
-A multiplexed gateway ticks every served profile from one process, and each of those ticks pruned
-the SAME repos (the Hermes checkout is in the list for every profile) — hundreds of concurrent
-``cron-worktree-prune`` threads forking ``git`` against one repo until the liveness watchdog gave up.
-"""
-
+import os
 import threading
-import time
-
-import pytest
 
 from cron import scheduler
-
-try:  # the base revision has no process-wide coordination layer
-    from cron import scheduler_worktree_maintenance as maintenance
-except ImportError:  # pragma: no cover - only on the base revision
-    maintenance = None
+from cron import scheduler_worktree_maintenance as maintenance
+from cron.scheduler_provider import _profile_cron_scope
+from hermes_constants import get_hermes_home
 
 
-def _join_prune_threads(timeout: float = 30.0) -> None:
-    """Join the sweeps this test dispatched (they run on daemon threads)."""
-    deadline = time.monotonic() + timeout
-    for thread in threading.enumerate():
-        if thread.name == "cron-worktree-prune":
-            thread.join(max(0.0, deadline - time.monotonic()))
+def _join_workers():
+    for worker in list(threading.enumerate()):
+        if worker.name == "cron-worktree-prune":
+            worker.join(10)
+            assert not worker.is_alive(), "maintenance did not drain"
 
 
-def _new_prune_threads(known):
-    return [t for t in threading.enumerate()
-            if t.name == "cron-worktree-prune" and t.ident not in known]
+def test_shared_repos_use_one_worker_without_losing_profile_work(tmp_path, monkeypatch):
+    entered, release = threading.Event(), threading.Event()
+    homes = [tmp_path / name for name in ("alpha", "beta", "gamma")]
+    shared, private = tmp_path / "shared", tmp_path / "private"
+    for repo in (shared, private):
+        (repo / ".worktrees").mkdir(parents=True)
+    starts, discoveries, pruned, reclaimed = [], [], [], []
+    thread_type = threading.Thread
 
-
-def test_a_shared_repo_is_pruned_once_however_many_profiles_tick(tmp_path, monkeypatch):
-    repo = tmp_path / "shared-repo"
-    (repo / ".worktrees").mkdir(parents=True)
-    pruned = []
-
-    monkeypatch.setattr(scheduler, "_last_worktree_maintenance_at", None)
-    monkeypatch.setattr(scheduler, "_worktree_maintenance_repos", lambda: [str(repo)])
-    monkeypatch.setattr("hermes_cli.worktree_ops._prune_stale_worktrees", pruned.append)
-
-    for index in range(3):
-        home = tmp_path / f"profile-{index}"
-        home.mkdir()
-        monkeypatch.setattr("hermes_constants.get_hermes_home", lambda home=home: home)
-        scheduler._maybe_run_worktree_maintenance()
-
-    _join_prune_threads()
-
-    assert pruned == [str(repo)], "every profile's tick pruned the same shared repo"
-
-
-def test_a_sweep_waits_instead_of_forking_git_beside_the_running_one(tmp_path, monkeypatch):
-    entered = threading.Event()
-    release = threading.Event()
-    discoveries = []
+    def new_thread(*args, **kwargs):
+        worker = thread_type(*args, **kwargs)
+        if worker.name == "cron-worktree-prune":
+            starts.append(worker)
+        return worker
 
     def discover():
-        discoveries.append(len(discoveries) + 1)
-        entered.set()
-        release.wait(30)
-        return []
+        home = get_hermes_home()
+        discoveries.append(home)
+        return [str(shared), str(private)] if home == homes[1] else [str(shared) + os.sep + "."]
+
+    def prune(repo):
+        pruned.append((os.path.realpath(repo), get_hermes_home()))
+        if not entered.is_set():
+            entered.set()
+            assert release.wait(10)
 
     monkeypatch.setattr(scheduler, "_last_worktree_maintenance_at", None)
+    monkeypatch.setattr(maintenance, "_last_pruned_at", {})
+    monkeypatch.setattr(threading, "Thread", new_thread)
     monkeypatch.setattr(scheduler, "_worktree_maintenance_repos", discover)
-    if maintenance is not None:
-        # The queue-ahead sweep stays blocked; the one behind it must give up, not run beside it.
-        monkeypatch.setattr(maintenance, "SWEEP_WAIT_SECONDS", 0.05)
-
-    monkeypatch.setattr("hermes_constants.get_hermes_home", lambda: tmp_path / "first")
+    monkeypatch.setattr("hermes_cli.worktree_ops._prune_stale_worktrees", prune)
+    monkeypatch.setattr("hermes_cli.worktree_ops._reclaim_orphan_install_states",
+                        lambda: reclaimed.append(get_hermes_home()))
     try:
-        scheduler._maybe_run_worktree_maintenance()
-        assert entered.wait(30), "the first sweep never started"
-
-        known = {t.ident for t in threading.enumerate() if t.name == "cron-worktree-prune"}
-        monkeypatch.setattr("hermes_constants.get_hermes_home", lambda: tmp_path / "second")
-        scheduler._maybe_run_worktree_maintenance()
-        for thread in _new_prune_threads(known):
-            thread.join(30)
-
-        assert len(discoveries) == 1, "a second sweep forked git beside the running one"
+        with _profile_cron_scope(homes[0]):
+            scheduler._maybe_run_worktree_maintenance()
+        assert entered.wait(10)
+        for home in homes[1:]:
+            with _profile_cron_scope(home):
+                scheduler._maybe_run_worktree_maintenance()
+                scheduler._maybe_run_worktree_maintenance()  # same profile is still throttled
+        assert len(starts) == 1, "a blocked sweep spawned a waiter thread for every profile"
     finally:
         release.set()
-        _join_prune_threads()
+        _join_workers()
+    assert discoveries == homes
+    assert pruned == [(str(shared.resolve()), homes[0]), (str(private.resolve()), homes[1])]
+    assert reclaimed == [homes[2]], "deduplicated repo work lost this profile's own cleanup"
 
 
-def test_a_profiles_own_repo_is_still_pruned(tmp_path, monkeypatch):
-    first = tmp_path / "first-repo"
-    second = tmp_path / "second-repo"
-    for repo in (first, second):
-        (repo / ".worktrees").mkdir(parents=True)
-    pruned = []
-    current = {"repos": [str(first)]}
-
+def test_maintenance_window_and_failed_discovery_allow_later_work(tmp_path, monkeypatch):
+    repo = tmp_path / "repo"
+    (repo / ".worktrees").mkdir(parents=True)
+    monkeypatch.setattr(maintenance, "_last_pruned_at", {})
+    assert maintenance.due_repos([str(repo)], interval_seconds=10, now=100) == [str(repo)]
+    assert maintenance.due_repos([str(repo) + os.sep + "."], interval_seconds=10, now=105) == []
+    assert maintenance.due_repos([str(repo)], interval_seconds=10, now=110) == [str(repo)]
+    monkeypatch.setattr(maintenance, "_last_pruned_at", {})
     monkeypatch.setattr(scheduler, "_last_worktree_maintenance_at", None)
-    monkeypatch.setattr(scheduler, "_worktree_maintenance_repos", lambda: current["repos"])
-    monkeypatch.setattr("hermes_cli.worktree_ops._prune_stale_worktrees", pruned.append)
-
-    monkeypatch.setattr("hermes_constants.get_hermes_home", lambda: tmp_path / "a")
-    scheduler._maybe_run_worktree_maintenance()
-    _join_prune_threads()
-
-    current["repos"] = [str(second)]
-    monkeypatch.setattr("hermes_constants.get_hermes_home", lambda: tmp_path / "b")
-    scheduler._maybe_run_worktree_maintenance()
-    _join_prune_threads()
-
-    assert pruned == [str(first), str(second)]
-
-
-def test_due_repos_is_a_window_not_a_permanent_skip(tmp_path, monkeypatch):
-    module = maintenance
-    if module is None:
-        pytest.skip("no per-repo maintenance window on this revision")
-        return
-    monkeypatch.setattr(module, "_last_pruned_at", {})
-    repo = str(tmp_path / "repo")
-
-    assert module.due_repos([repo], interval_seconds=3600, now=100.0) == [repo]
-    assert module.due_repos([repo], interval_seconds=3600, now=200.0) == []
-    assert module.due_repos([repo], interval_seconds=3600, now=3701.0) == [repo]
-
-
-def test_the_sweep_slot_is_released_when_discovery_raises(tmp_path, monkeypatch):
-    module = maintenance
-    if module is None:
-        pytest.skip("no process-wide sweep slot on this revision")
-        return
+    discovered, pruned = [], []
+    broken, healthy = tmp_path / "broken", tmp_path / "healthy"
 
     def discover():
-        raise RuntimeError("repo lookup blew up")
+        home = get_hermes_home()
+        discovered.append(home)
+        if home == broken:
+            raise OSError("registered repo lookup failed")
+        return [str(repo)]
 
-    monkeypatch.setattr(scheduler, "_last_worktree_maintenance_at", None)
     monkeypatch.setattr(scheduler, "_worktree_maintenance_repos", discover)
-    monkeypatch.setattr("hermes_constants.get_hermes_home", lambda: tmp_path / "a")
-
-    scheduler._maybe_run_worktree_maintenance()
-    _join_prune_threads()
-
-    assert maintenance.claim_sweep_slot(0.1), "a failed sweep parked the process-wide slot"
-    maintenance.release_sweep_slot()
+    monkeypatch.setattr("hermes_cli.worktree_ops._prune_stale_worktrees",
+                        lambda path: pruned.append((path, get_hermes_home())))
+    with _profile_cron_scope(broken):
+        scheduler._maybe_run_worktree_maintenance()
+    _join_workers()
+    with _profile_cron_scope(healthy):
+        scheduler._maybe_run_worktree_maintenance()
+    _join_workers()
+    assert discovered == [broken, healthy]
+    assert pruned == [(str(repo), healthy)]

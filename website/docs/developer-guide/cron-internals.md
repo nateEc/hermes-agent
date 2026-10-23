@@ -216,6 +216,13 @@ drain) stops a run that still holds its claim.
 
 ### Gateway Integration
 
+The ticker also schedules worktree hygiene every six hours per profile. A single
+daemon worker drains these requests off the tick thread, discovering repositories
+under each requesting profile's captured context. Canonical repository paths are
+pruned at most once per interval across the process; profile-private repositories
+and orphan install-state cleanup still run under their own profile. This bounds
+Git subprocess concurrency without spawning a waiting thread for every profile.
+
 In gateway mode, the cron **trigger** (the part that decides *when* a due job
 fires — "Axis B") is selected through a pluggable `CronScheduler` provider. The
 gateway calls `resolve_cron_scheduler()` (`cron/scheduler_provider.py`) and runs

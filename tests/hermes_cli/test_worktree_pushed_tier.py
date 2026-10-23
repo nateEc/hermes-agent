@@ -245,12 +245,13 @@ class TestAttendedGcPushedTier:
 class TestCronWorktreeMaintenance:
     def test_throttle_dispatches_once_per_interval(self, monkeypatch):
         import cron.scheduler as sched
+        from cron import scheduler_worktree_maintenance as maintenance
 
         calls = []
         monkeypatch.setattr(sched, "_last_worktree_maintenance_at", None)
         monkeypatch.setattr(
-            sched.threading, "Thread",
-            lambda *a, **k: type("T", (), {"start": lambda self: calls.append(k.get("name"))})(),
+            maintenance, "enqueue_sweep",
+            lambda home, discover, **kwargs: calls.append(home),
         )
 
         sched._maybe_run_worktree_maintenance()
