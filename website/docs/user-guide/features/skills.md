@@ -687,6 +687,7 @@ reviewed with the same familiar approve/deny flow as dangerous commands:
 
 ```
 /skills pending             # list staged skill writes + a one-line gist each
+/skills pending --json      # full records and nested write payloads, read-only
 /skills diff <id>           # full unified diff (best viewed in CLI or dashboard)
 /skills approve <id>        # apply it (or 'all')
 /skills reject <id>         # drop it (or 'all')
@@ -697,6 +698,10 @@ The review surface works in the interactive CLI and on messaging platforms
 (diff output is truncated for chat bubbles — read the full diff on the CLI or
 in the pending JSON file). Memory writes have the same gate under
 `memory.write_approval` — see [Controlling memory writes](./memory.md#controlling-memory-writes-write_approval).
+
+`pending --json` returns `{"count": N, "records": [...]}` in oldest-first order,
+with each record's full metadata and `payload`. It does not approve or alter the
+pending files. Use the CLI when a messaging platform would truncate a long reply.
 
 > The separate `skills.guard_agent_created` setting is a content scanner
 > (dangerous-pattern heuristics), not an approval gate — the two are

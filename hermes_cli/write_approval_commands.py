@@ -45,6 +45,9 @@ def handle_pending_subcommand(
         return f"{_fmt_state(subsystem)}\n\n" + _fmt_pending_list(subsystem)
     sub, rest = args[0].lower(), args[1:]
     if sub == "pending":
+        if "--json" in rest:
+            records = wa.list_pending(subsystem)
+            return json.dumps({"count": len(records), "records": records}, ensure_ascii=False)
         return _fmt_pending_list(subsystem)
     if sub in {"approve", "apply"}:
         return _approve(subsystem, rest, memory_store)

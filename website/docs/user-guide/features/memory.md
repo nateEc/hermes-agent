@@ -344,6 +344,7 @@ Review staged writes from the CLI or any messaging platform:
 
 ```
 /memory pending             # list staged memory writes (auto ones tagged [auto])
+/memory pending --json      # full records, including the untruncated payload
 /memory approve <id>        # apply one (or 'all')
 /memory reject <id>         # drop one (or 'all')
 /memory approval on         # turn the gate on (or 'off') and persist it
@@ -352,6 +353,12 @@ Review staged writes from the CLI or any messaging platform:
 This is the answer to "the agent saved a wrong assumption about me": set
 `write_approval: true`, and every save — especially the unprompted background
 ones — waits for your yes/no before it ever enters your profile.
+
+The normal list is a short summary, not the full proposed replacement.
+`/memory pending --json` returns `{"count": N, "records": [...]}` in oldest-first
+order. Each record includes its metadata and complete `payload` (including batch
+operations and pinned entries); reviewing it does not approve or change anything.
+Use the CLI for untruncated output if your messaging platform limits reply length.
 
 A staged `patch` or `remove` (the background review stages these even with the
 gate off) records the full entry it targets, and `/memory pending` shows it.
@@ -529,6 +536,7 @@ inline, but the full diff stays out-of-band:
 
 ```
 /skills pending             # list staged skill writes + a one-line gist each
+/skills pending --json      # full records and nested write payloads, read-only
 /skills diff <id>           # full unified diff (best viewed in CLI or dashboard)
 /skills approve <id>        # apply it (or 'all')
 /skills reject <id>         # drop it (or 'all')
