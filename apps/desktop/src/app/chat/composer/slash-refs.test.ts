@@ -1,6 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
-import { rememberDesktopCommandsCatalog } from '@/lib/desktop-slash-commands'
+import { desktopSlashCommandArgumentMode, rememberDesktopCommandsCatalog } from '@/lib/desktop-slash-commands'
+import { queryClient } from '@/lib/query-client'
+import { cachedSlashCompletion } from '@/lib/slash-completion-cache'
 
 import { slashCommandMatches } from './slash-refs'
 
@@ -53,5 +55,28 @@ describe('slashCommandMatches', () => {
 
   it('disqualifies a leading token when the text lands mid-word', () => {
     expect(commands('/some-skill ', { boundaryBefore: false })).toEqual([])
+  })
+
+  it.each(['/plan', '/new', '/help', '/reset'])('keeps %s editable before and after catalog hydration', async command => {
+    queryClient.clear()
+    rememberDesktopCommandsCatalog(undefined)
+    expect(commands(`${command} `)).toEqual([])
+    expect(desktopSlashCommandArgumentMode(command)).toBeUndefined()
+
+    const catalog = {
+      commands: { [command]: { argument_mode: 'text' as const, desktop: null }, '/version': { argument_mode: null, desktop: null } }
+    }
+
+    await cachedSlashCompletion('catalog', async () => catalog)
+    expect(commands(`${command} `)).toEqual([])
+    expect(desktopSlashCommandArgumentMode(command)).toBe('text')
+    expect(commands('/version ')).toEqual(['command:/version'])
+
+    // Losing the cached response must not turn unknown into "no arguments".
+    queryClient.clear()
+    expect(commands(`${command} `, { trailingCommitted: true })).toEqual([])
+    rememberDesktopCommandsCatalog(catalog)
+    expect(commands(`${command} `)).toEqual([])
+    expect(commands('/some-skill ')).toEqual(['skill:/some-skill'])
   })
 })

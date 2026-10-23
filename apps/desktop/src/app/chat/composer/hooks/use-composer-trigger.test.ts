@@ -4,6 +4,8 @@ import { createRef } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { rememberDesktopCommandsCatalog } from '@/lib/desktop-slash-commands'
+import { queryClient } from '@/lib/query-client'
+import { cachedSlashCompletion } from '@/lib/slash-completion-cache'
 
 import { composerPlainText, renderComposerContents, RICH_INPUT_SLOT } from '../rich-editor'
 
@@ -161,6 +163,39 @@ describe('useComposerTrigger — slash anywhere in the prompt', () => {
 })
 
 describe('useComposerTrigger — free-text slash arguments', () => {
+  it.each([
+    ['/plan', 'text'], ['/new', 'text'], ['/help', 'text'], ['/goal', 'mixed'], ['/personality', 'options']
+  ] as const)('does not seal a cold-catalog %s pick before its argument stage', async (command, mode) => {
+    const catalog = { commands: { [command]: { argument_mode: mode, desktop: null } } }
+
+    for (const phase of ['cold', 'remembered', 'cached']) {
+      queryClient.clear()
+      rememberDesktopCommandsCatalog(phase === 'remembered' ? catalog : undefined)
+
+      if (phase === 'cached') {await cachedSlashCompletion('catalog', async () => catalog)}
+
+      const editor = mountEditor(command.slice(0, -1))
+      const picked = item(command, 'Commands')
+      const { hook } = mountTrigger(editor, [picked])
+
+      try {
+        act(() => hook.result.current.refreshTrigger())
+        act(() => hook.result.current.replaceTriggerWithChip(picked))
+        expect(composerPlainText(editor)).toBe(`${command} `)
+        expect(editor.querySelector('[data-slash-kind]')).toBeNull()
+
+        if (phase !== 'cold') {
+          expect(hook.result.current.trigger === null).toBe(mode === 'text')
+        }
+      } finally {
+        hook.unmount()
+        editor.remove()
+      }
+    }
+
+    queryClient.clear()
+  })
+
   it('keeps a picked /goal command as editable text while retaining subcommand completion', () => {
     const editor = mountEditor('/go')
     const goal = item('/goal', 'Commands')

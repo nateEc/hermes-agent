@@ -873,8 +873,10 @@ export function desktopSlashDescription(command: string, fallback = ''): string 
   return `${description}${usage}`
 }
 
-export function desktopSlashCommandArgumentMode(command: string): DesktopSlashArgumentMode | null {
-  return resolveDesktopCommand(command)?.argumentMode ?? asArgumentMode(catalogMeta(command)?.argument_mode) ?? null
+/** Unknown before catalog hydration is not the same as a known argument-less command. */
+export function desktopSlashCommandArgumentMode(command: string): DesktopSlashArgumentMode | null | undefined {
+  return resolveDesktopCommand(command)?.argumentMode ?? asArgumentMode(catalogMeta(command)?.argument_mode) ??
+    (liveCatalog() ? null : undefined)
 }
 
 export function desktopSkinSlashCompletions(
