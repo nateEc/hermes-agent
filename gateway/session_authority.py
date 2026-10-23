@@ -86,6 +86,8 @@ class LiveSession:
     # Revision of the last ``session.control.update`` (gateway/session_control_actions.publish): a tool
     # completion republishes only when a tool actually moved the goal/loop/heartbeat state.
     control_revision: str = ""
+    # Connection-local declarations, retired with the subscription, never part of frozen policy.
+    clarify_batch_viewers: set = field(default_factory=set)
 
     def __post_init__(self):
         self.controls = PendingControls(self.event_stream)
@@ -362,14 +364,18 @@ class SessionAuthority:
         live = self.sessions[session_id]
         for subscription, member in list(live.subscribers.items()):
             if self.events.get(member.transport_id) is transport:
-                del live.subscribers[subscription]
+                with live.event_stream.lock:
+                    del live.subscribers[subscription]
+                    live.clarify_batch_viewers.discard(member.transport_id)
 
     async def detach(self, actor, subscription_id, *, end_reason=None):
         for session_id, live in self.sessions.items():
             if subscription_id in live.subscribers:
                 if live.subscribers[subscription_id] != actor:
                     raise RuntimeStoreError('permission_denied')
-                del live.subscribers[subscription_id]
+                with live.event_stream.lock:
+                    del live.subscribers[subscription_id]
+                    live.clarify_batch_viewers.discard(actor.transport_id)
                 transport = self.events.get(actor.transport_id)
                 if transport is not None:
                     live.event_stream.fanout.detach(transport)

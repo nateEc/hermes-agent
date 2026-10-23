@@ -694,6 +694,9 @@ class AuthorityConnection:
         # The interactive WS is the one surface a restart's after-turn wait admits (#139041).
         receipt = await self.authority.submit(self.actor, self.submission(ref, params),
                                               queue_while_restarting=self._operator is True)
+        if 'clarify_batch' in params:
+            from gateway.session_cli_turn import remember_viewer_clarify_batch
+            remember_viewer_clarify_batch(self.authority, self.actor, ref, params['clarify_batch'])
         return asdict(receipt)
 
     def _voice_stop_key(self, ref, params):

@@ -157,14 +157,41 @@ def classic_cli_turn(turn):
     return policy is not None and policy.platform == 'cli'
 
 
+def remember_viewer_clarify_batch(authority, actor, ref, enabled):
+    """An accepted submit declares this subscription's capability, not persistent session policy."""
+    live = authority.sessions.get(ref.session_id)
+    if live is None:
+        return
+    with live.event_stream.lock:
+        if actor not in live.subscribers.values():
+            return  # detached while the admission committed
+        if enabled is True:
+            live.clarify_batch_viewers.add(actor.transport_id)
+        else:
+            live.clarify_batch_viewers.discard(actor.transport_id)
+
+
 def clarify_batch_turn(turn):
-    """The clarify tool's batch goes to main's batch panel as one request: a local-viewer turn whose
-    submitter declared it answers the whole set (``clarify_batch`` committed with its admission).
-    Main's classic CLI, Ink TUI and Desktop all showed every question at once (TUI-18); a viewer that
-    never asks (an ACP editor, a raw WebSocket client) keeps one ``clarify.request`` card per question."""
+    """The submitting viewer's batch panel, or the live viewers' shared capability for a notice.
+
+    Ordinary inputs keep their own committed flag. A background notice has no submitter, so it may
+    use the batch only while every attached viewer declared support; unknown clients keep cards.
+    """
     from gateway.run_turn_progress import local_viewer_turn
-    return local_viewer_turn(turn) and bool(
-        cli_turn(getattr(turn._ctx, 'inbound_message_id', None)).get('clarify_batch'))
+    if not local_viewer_turn(turn):
+        return False
+    if cli_turn(getattr(turn._ctx, 'inbound_message_id', None)).get('clarify_batch'):
+        return True
+    from gateway.response_filters import is_machinery_display_kind
+    if not is_machinery_display_kind(getattr(turn._ctx, 'persist_user_display_kind', None)):
+        return False
+    authority, session_id, _generation = turn._approval_owner
+    live = authority.sessions.get(session_id)
+    if live is None:
+        return False
+    with live.event_stream.lock:
+        viewers = tuple(live.subscribers.values())
+        return bool(viewers) and all(viewer.transport_id in live.clarify_batch_viewers for viewer in viewers)
 
 
 def take_cli_result_fields(result, *, aux_before=None, session_db=None, session_id=None):

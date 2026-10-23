@@ -201,6 +201,12 @@ viewers receive `clarify.request` events and pending questions in the `session.r
 `prompts` snapshot. This is an authority API contract; it does not imply that every
 native frontend already renders the shared form or that ordinary bootstrap is complete.
 
+Local viewers may declare `clarify_batch: true` on an accepted `prompt.submit`. The declaration
+lasts only for that live subscription. A process/delegation notice without a submitting viewer
+uses one batch request only if every attached viewer declared support; otherwise it keeps
+per-question cards. Detach, overflow retirement, or an explicit `false` clears the declaration.
+Ordinary user inputs still use their own admission flag, not another turn's fields or cached policy.
+
 A response uses `clarify.respond` with `session_id`, `execution_generation`, `prompt_id`,
 and an `answer` string. The connected viewer must be subscribed and have
 `session:respond`. The authority checks the running generation and resolves the existing
