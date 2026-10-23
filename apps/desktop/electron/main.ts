@@ -573,12 +573,12 @@ import { installSystemCaTrust } from './system-ca'
 import { registerTerminalIpc } from './terminal-ipc'
 import { nativeOverlayWidth as computeNativeOverlayWidth, titleBarOverlayOptions } from './titlebar-overlay-width'
 import {
+  applyWindowOpacity,
   applyWindowsBackdrop,
   defaultTranslucencyState,
   glassActive,
   glassSupportedOn,
   normalizeState as normalizeTranslucency,
-  opacityNeedsSetting,
   translucencySupportedOn,
   vibrancyFor as vibrancyForTranslucency,
   windowBackgroundMaterialOptions,
@@ -1530,18 +1530,6 @@ let translucencyState = readPersistedTranslucency()
 // painting a themed backing onto them would turn them into opaque rectangles.
 const translucencyBackedWindows = new WeakSet()
 
-// Set a live window's native opacity, but only when the state asks it to fade
-// — or when the window is already faded and is on its way back to opaque. The
-// window's own opacity is the record of whether that door was ever opened; see
-// opacityNeedsSetting for why it matters that it stays shut.
-function applyWindowOpacity(win) {
-  const opacity = windowOpacityFor(translucencyState)
-
-  if (typeof win.setOpacity === 'function' && opacityNeedsSetting(opacity, win.getOpacity?.() ?? 1)) {
-    win.setOpacity(opacity)
-  }
-}
-
 // Re-apply translucency to a live window (runtime toggle, no recreation).
 // Opacity goes through applyWindowOpacity, which knows when the call is worth
 // making at all. The backing swap is the glass half: Chromium composites the
@@ -1591,7 +1579,7 @@ function applyWindowTranslucency(win, changed = { backing: true, material: true,
     }
 
     if (changed.opacity) {
-      applyWindowOpacity(win)
+      applyWindowOpacity(win, translucencyState)
     }
   } catch (error) {
     rememberLog(`[translucency] apply failed: ${error.message}`)
