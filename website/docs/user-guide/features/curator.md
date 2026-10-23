@@ -177,6 +177,10 @@ skills:
 
 The file is also size-bounded: once it grows past `skills.ledger_max_bytes` (default 5 MB), the next mutation first rewrites it through the unchanged-file dedup (exactly what `hermes curator ledger --compact` does) and, if genuinely-divergent entries still exceed the cap, drops the oldest ones regardless of shape — the newest entry always survives, lines in the retained tail are never rewritten or parsed (a malformed line there survives verbatim), and the sweep frees blobs nothing references anymore and older than an hour (a fresh unreferenced blob may belong to a capture another process has not yet recorded). Set it to `0` to keep the ledger append-only forever.
 
+Recapturing existing content renews that one-hour grace under the collector's lock, so an old
+unreferenced blob reused by an edit is protected just like newly stored content. This is a bounded
+grace period, not an indefinite reservation for edits stalled longer than an hour.
+
 ```yaml
 skills:
   ledger_max_bytes: 5242880   # 0 = never auto-maintain

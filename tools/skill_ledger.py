@@ -135,14 +135,19 @@ def _is_within(root: Path, path: Path) -> bool:
 
 
 def _store_blob(data: bytes) -> str:
-    """Write *data* keyed by sha256 (existing blob left alone). Returns the hash."""
+    """Store *data* keyed by sha256, renewing the capture's GC grace on reuse."""
     digest = hashlib.sha256(data).hexdigest()
     dest = blobs_dir() / digest
-    if not dest.exists():
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        tmp = dest.with_name(f".tmp-{uuid.uuid4().hex[:8]}-{digest}")
-        tmp.write_bytes(data)
-        os.replace(tmp, dest)
+    # A collector must not unlink an old orphan after we have reused/refreshed it. Use the
+    # same lock as its stat/unlink verdict; a collector that won first leaves us recreating it.
+    with _ledger_lock():
+        if dest.exists():
+            os.utime(dest, None)
+        else:
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            tmp = dest.with_name(f".tmp-{uuid.uuid4().hex[:8]}-{digest}")
+            tmp.write_bytes(data)
+            os.replace(tmp, dest)
     return digest
 
 
