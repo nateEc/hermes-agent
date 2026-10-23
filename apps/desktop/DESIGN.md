@@ -144,6 +144,8 @@ keeps its platform/appearance defaults. Explicitly saved settings take precedenc
 changing defaults must not overwrite a user's existing choices. The shared
 `apps/shared/src/translucency.ts` resolver owns these defaults for both the
 renderer and Electron's first window paint.
+Linux keeps opaque native chat windows: the feature's platform gate applies
+to both window creation and live opacity updates, including imported settings.
 
 ## Stroke & color tokens
 

@@ -11,6 +11,7 @@
 import { describe, expect, it } from 'vitest'
 
 import {
+  applyWindowOpacity,
   backgroundMaterialFor,
   clampIntensity,
   DEFAULT_GLASS_MATERIAL,
@@ -492,14 +493,31 @@ describe('windowBackgroundMaterialOptions', () => {
 // not draw acrylic behind: the window rendered while focused and went dead the
 // moment it lost focus. The no-op ask has to not be made.
 describe('windowOpacityOptions', () => {
+  it.each(['linux', 'freebsd', 'darwin', 'win32'])('respects platform support at creation on %s', platform => {
+    const supported = translucencySupportedOn(platform)
+
+    const states = [
+      defaultTranslucencyState('light', glassSupportedOn(platform), platform === 'win32'),
+      defaultTranslucencyState('dark', glassSupportedOn(platform), platform === 'win32'),
+      normalizeState({ intensity: 80, mode: 'clear' }, glassSupportedOn(platform)),
+      normalizeState({ intensity: 60, fade: 50, mode: 'glass' }, glassSupportedOn(platform))
+    ]
+
+    for (const state of states) {
+      const expected = supported && windowOpacityFor(state) < 1 ? { opacity: windowOpacityFor(state) } : {}
+
+      expect(windowOpacityOptions(state, supported)).toStrictEqual(expected)
+    }
+  })
+
   it('omits opacity entirely when the window is fully opaque', () => {
-    expect(windowOpacityOptions(glass(60))).toStrictEqual({})
-    expect(windowOpacityOptions(clear(0))).toStrictEqual({})
+    expect(windowOpacityOptions(glass(60), true)).toStrictEqual({})
+    expect(windowOpacityOptions(clear(0), true)).toStrictEqual({})
   })
 
   it('passes it the moment the state actually fades', () => {
     for (const state of [clear(1), clear(100), glass(60, DEFAULT_GLASS_MATERIAL, 1)]) {
-      expect(windowOpacityOptions(state)).toStrictEqual({ opacity: windowOpacityFor(state) })
+      expect(windowOpacityOptions(state, true)).toStrictEqual({ opacity: windowOpacityFor(state) })
     }
   })
 
@@ -510,8 +528,40 @@ describe('windowOpacityOptions', () => {
     for (const appearance of ['light', 'dark'] as const) {
       const state = { ...defaultTranslucencyValues(appearance, true), mode: 'glass' as const }
 
-      expect(windowOpacityOptions(state), appearance).toStrictEqual({})
+      expect(windowOpacityOptions(state, true), appearance).toStrictEqual({})
     }
+  })
+})
+
+describe('applyWindowOpacity', () => {
+  it.each(['linux', 'freebsd', 'darwin', 'win32'])('gates live fades without breaking restoration on %s', platform => {
+    const supported = translucencySupportedOn(platform)
+    const writes: number[] = []
+    let opacity = 1
+
+    const win = {
+      getOpacity: () => opacity,
+      setOpacity: (next: number) => {
+        writes.push(next)
+        opacity = next
+      }
+    }
+
+    applyWindowOpacity(win, clear(0), supported)
+    expect(writes).toEqual([])
+
+    for (const state of [clear(70), glass(60, DEFAULT_GLASS_MATERIAL, 40)]) {
+      applyWindowOpacity(win, state, supported)
+      expect(opacity).toBe(supported ? windowOpacityFor(state) : 1)
+    }
+
+    applyWindowOpacity(win, clear(0), supported)
+    expect(opacity).toBe(1)
+    expect(writes).toEqual(
+      supported ? [windowOpacityFor(clear(70)), windowOpacityFor(glass(60, DEFAULT_GLASS_MATERIAL, 40)), 1] : []
+    )
+    applyWindowOpacity(win, clear(0), supported)
+    expect(writes).toHaveLength(supported ? 3 : 0)
   })
 })
 

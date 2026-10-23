@@ -7,7 +7,7 @@
  *
  * - 'clear' — the main process maps the lever to native window opacity
  *   (`setOpacity`), so the whole window fades, text included. macOS + Windows;
- *   `setOpacity` is a no-op on Linux.
+ *   unsupported platforms are gated at native window creation and updates.
  * - 'glass' — the window stays fully opaque at the native level and the
  *   renderer thins its page surfaces instead, letting a platform material
  *   read as a matte blur while text keeps full contrast. macOS rides
@@ -142,8 +142,8 @@ const DEFAULT_VALUES: Record<'mac' | 'windows', Record<Appearance, TranslucencyV
 }
 
 /**
- * The untouched values for an appearance on this platform. Linux never reaches
- * here — translucency is unsupported there, so nothing resolves.
+ * The untouched values for an appearance in a supported platform family.
+ * Native window creation/updates gate unsupported platforms independently of stored values.
  */
 export function defaultTranslucencyValues(appearance: Appearance, isWindows: boolean): TranslucencyValues {
   return DEFAULT_VALUES[isWindows ? 'windows' : 'mac'][appearance]
@@ -194,10 +194,9 @@ export function clampIntensity(value: unknown): number {
 }
 
 /**
- * Whether this OS can do ANY translucency. Clear rides `setOpacity`, which
- * Electron documents as doing nothing on Linux, and glass needs a native
- * material Linux does not have — so the whole setting is dead there and the
- * row should not be shown at all.
+ * Whether Hermes offers translucency on this OS. The native opacity paths use
+ * the same gate as the setting row: Electron's Linux/X11 opacity implementation
+ * must not fade windows on a platform where the setting is hidden.
  */
 export function translucencySupportedOn(platform: string): boolean {
   return platform === 'darwin' || platform === 'win32'

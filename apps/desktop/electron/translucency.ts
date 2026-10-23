@@ -144,8 +144,13 @@ export function opacityNeedsSetting(next: number, current = 1): boolean {
 /** Apply the fade without layering an untouched opaque window (see opacityNeedsSetting). */
 export function applyWindowOpacity(
   win: Partial<Pick<BrowserWindow, 'getOpacity' | 'setOpacity'>>,
-  state: TranslucencyState
+  state: TranslucencyState,
+  supported: boolean
 ): void {
+  if (!supported) {
+    return
+  }
+
   const opacity = windowOpacityFor(state)
 
   if (typeof win.setOpacity === 'function' && opacityNeedsSetting(opacity, win.getOpacity?.() ?? 1)) {
@@ -157,8 +162,8 @@ export function applyWindowOpacity(
  * BrowserWindow constructor options for a chat window's native opacity. Empty
  * unless the state actually asks the window to fade — see opacityNeedsSetting.
  */
-export function windowOpacityOptions(state: TranslucencyState): { opacity?: number } {
+export function windowOpacityOptions(state: TranslucencyState, supported: boolean): { opacity?: number } {
   const opacity = windowOpacityFor(state)
 
-  return opacityNeedsSetting(opacity) ? { opacity } : {}
+  return supported && opacityNeedsSetting(opacity) ? { opacity } : {}
 }
