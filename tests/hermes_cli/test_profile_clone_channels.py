@@ -154,7 +154,7 @@ _LINKED_KEEPERS = {".env": "OPENAI_API_KEY=sk-model-key", "config.yaml": "gpt-5"
 @pytest.mark.require_symlinks
 @pytest.mark.parametrize("name", sorted(_LINKED_KEEPERS))
 @pytest.mark.parametrize("layout", ["default-outside", "named-outside", "named-linked-dir", "default-skipped-dir",
-                                    "default-absolute"])
+                                    "default-absolute", "default-shadowed-target"])
 def test_clone_all_copies_a_linked_root_file_as_the_source_resolves_it(home, tmp_path, layout, name):
     """GNU Stow links ``config.yaml -> ../dotfiles/hermes/config.yaml``, relative to the source profile's
     directory (#142943). Resolved from the staged copy, which sits elsewhere, it named another path and the
@@ -172,6 +172,13 @@ def test_clone_all_copies_a_linked_root_file_as_the_source_resolves_it(home, tmp
     (real / name).unlink(missing_ok=True)
     (real / name).symlink_to(target if layout == "default-absolute" else os.path.relpath(target, real))
     original = target.read_bytes()
+    if layout == "default-shadowed-target":
+        # The same link text names an existing, DIFFERENT file from the clone's staging depth.
+        shadow = home / "profiles" / "dotfiles" / "hermes" / name
+        shadow.parent.mkdir(parents=True, exist_ok=True)
+        shadow.write_text({".env": "OPENAI_API_KEY=sk-other-profile\n", "SOUL.md": "Other persona.",
+                           "config.yaml": "model:\n  default: other-profile-model\n"}[name], encoding="utf-8")
+        shadow_before = shadow.read_bytes()
 
     profile_dir = create_profile("full", clone_from="src" if layout.startswith("named") else "default",
                                  clone_all=True, no_alias=True)
@@ -180,6 +187,8 @@ def test_clone_all_copies_a_linked_root_file_as_the_source_resolves_it(home, tmp
     assert cloned.is_file() and not cloned.is_symlink()
     assert _LINKED_KEEPERS[name] in cloned.read_text(encoding="utf-8")
     assert (real / name).is_symlink() and target.read_bytes() == original  # never written through
+    if layout == "default-shadowed-target":
+        assert shadow.read_bytes() == shadow_before
 
 
 @pytest.mark.require_symlinks
