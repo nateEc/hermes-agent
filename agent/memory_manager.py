@@ -7,6 +7,7 @@ registered at a time (tool-schema bloat, conflicting backends).
 from __future__ import annotations
 
 import contextvars
+import heapq
 import inspect
 import json
 import logging
@@ -103,34 +104,26 @@ def _mask_learned_literals(text: str, literals: list[str]) -> str:
     A learned literal is as long as the value the scrub removed, so a transcript holding a 64 KiB
     credential handed ``re.compile`` a 64 KiB alternation: a parser node sequence per byte, a
     multi-megabyte temporary tree and a round of collections, for a match one ``str.find`` answers.
-    Literals arrive longest-first and the scan keeps that preference at the same position, so the
-    masked result is the one the regex produced; a text carrying none of them comes back as itself.
+    Keep one candidate offset per literal, ordered leftmost then longest. A consumed overlap is
+    advanced lazily, so an absent literal is not re-searched after every replacement.
     """
-    if not literals:
+    matches = [(at, -len(literal), literal) for literal in literals
+               if literal and (at := text.find(literal)) >= 0]
+    if not matches:
         return text
-    literals = [literal for literal in literals if literal]  # an empty one would match at every offset
-    if not literals:
-        return text
+    heapq.heapify(matches)
     pieces: list[str] = []
-    pos, end = 0, len(text)
-    while pos < end:
-        at, width = -1, 0
-        for literal in literals:
-            found = text.find(literal, pos)
-            if found < 0:
-                continue
-            if at < 0 or found < at or (found == at and len(literal) > width):
-                at, width = found, len(literal)
-        if at < 0:
-            break
-        pieces.append(text[pos:at])
-        pieces.append("[redacted]")
-        pos = at + width
-    if not pieces:
-        return text
+    pos = 0
+    while matches:
+        at, negative_width, literal = heapq.heappop(matches)
+        if at >= pos:
+            pieces.extend((text[pos:at], "[redacted]"))
+            pos = at - negative_width
+        next_at = text.find(literal, pos)
+        if next_at >= 0:
+            heapq.heappush(matches, (next_at, negative_width, literal))
     pieces.append(text[pos:])
     return "".join(pieces)
-
 
 
 def _redact_for_provider(*values: Any) -> Any:

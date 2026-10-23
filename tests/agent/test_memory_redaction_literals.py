@@ -1,70 +1,62 @@
-"""The learned-literal mask is a scan, not a regex compiled out of the literals (#143111).
+"""Memory-provider handoffs retain masking semantics without parser-sized temporary allocation."""
 
-The first egress scrub learns the values it removed and the same hand-off masks any bare echo of them.
-That second pass used to escape the literals into one alternation and ``re.compile`` it, so a value the
-size of a transcript's credential cost a parser node per byte. These rows pin the replacement: nothing
-proportional to a literal is compiled, and the masked text is the one the alternation produced.
-"""
 import re
+import tracemalloc
 
 import pytest
 
-from agent import memory_manager
 from agent.memory_manager import _redact_for_provider
-
-# Generated, not a credential: 4,096 characters of an opaque value, the shape of the report's 64 KiB case.
-_SECRET = "aB09xyZ7" * 512
+from agent.redact import redact_for_egress
 
 
-class _CompileRecorder:
-    """Stands in for ``re`` inside ``agent.memory_manager`` and records what it compiles."""
-
-    def __init__(self):
-        self.patterns = []
-
-    def compile(self, pattern, *args, **kwargs):
-        self.patterns.append(str(pattern))
-        return re.compile(pattern, *args, **kwargs)
-
-    def __getattr__(self, name):
-        return getattr(re, name)
-
-
-def _alternation_mask(text, literals):
-    """The second pass as it was before this change, kept as the reference for the equivalence rows."""
-    ordered = sorted(literals, key=len, reverse=True)
-    pattern = re.compile("|".join(re.escape(literal) for literal in ordered))
-    return pattern.sub("[redacted]", text) if pattern.search(text) else text
-
-
-def test_a_long_learned_literal_is_masked_without_compiling_an_alternation(monkeypatch):
-    recorder = _CompileRecorder()
-    monkeypatch.setattr(memory_manager, "re", recorder)
-    tool = "Authorization: Bearer " + _SECRET
-    payload = {"tool": tool, "echo": ["echo " + _SECRET]}
-
-    out = _redact_for_provider(payload)
-
-    assert _SECRET not in repr(out)  # the bare echo of a value the scrub removed is still masked
-    assert payload["echo"][0] == "echo " + _SECRET  # the caller keeps its own copy
-    assert not recorder.patterns, "compiled patterns: %r" % [p[:80] for p in recorder.patterns]
+@pytest.mark.parametrize("local_redaction", [False, True])
+def test_large_credential_handoff_masks_echoes_with_bounded_temporary_allocation(monkeypatch, local_redaction):
+    monkeypatch.setattr("agent.redact._REDACT_ENABLED", local_redaction)
+    secret = "aB09xyZ7" * 8192
+    payload = {"tool": "Authorization: Bearer " + secret, "echo": ["echo " + secret]}
+    assert redact_for_egress(secret) == secret
+    redact_for_egress("Authorization: Bearer synthetic-warmup-token-12345")
+    re.purge()
+    tracing = tracemalloc.is_tracing()
+    if not tracing:
+        tracemalloc.start()
+    before = tracemalloc.get_traced_memory()[0]
+    tracemalloc.reset_peak()
+    try:
+        output = _redact_for_provider(payload)
+        extra_peak = tracemalloc.get_traced_memory()[1] - before
+    finally:
+        if not tracing:
+            tracemalloc.stop()
+    assert secret not in repr(output)
+    assert payload["echo"][0] == "echo " + secret
+    # Generous relative budget: linear string work fits; a regex parser node per byte does not.
+    assert extra_peak < len(secret) * 16, "literal masking allocated a parser-sized temporary tree"
 
 
 @pytest.mark.parametrize("text,literals", [
-    ("xxabcdefyy", ["abcd", "abcdef"]),          # the longer literal wins at the same position
-    ("abcdef", ["abcdef", "abcd", "cdef"]),      # and only that one is consumed
-    ("ab-ab-ab", ["ab"]),                        # every occurrence, not just the first
-    ("tail-secret", ["secret"]),                 # a match that ends the text
-    ("secretsecret", ["secret"]),                # adjacent matches
-    ("abcXXbc", ["bc", "abc"]),                  # leftmost wins over a longer one further right
-    ("naïve-ñ", ["ïve", "ñ"]),                   # non-ASCII literals
-    ("nothing here", ["absent"]),                # no match at all
+    ("xxabcdefghijklmnopqrstuvXYZyy", ["abcdefghijklmnopqrstuv", "abcdefghijklmnopqrstuvXYZ"]),
+    ("abcdefghijklmnopqrstuvXYZ", ["abcdefghijklmnopqrstuvXYZ", "abcdefghijklmnopqrstuv", "cdefghijklmnopqrstuvXYZ"]),
+    ("abcdefghijklmnopqrstuvXXcdefghijklmnopqrstuv", ["cdefghijklmnopqrstuv", "abcdefghijklmnopqrstuv"]),
+    ("abcdefghijklmnopqrstuv" * 3, ["abcdefghijklmnopqrstuv"]),
+    ("nothing to mask", ["abcdefghijklmnopqrstuv"]),
+    ("abc.def+ghi/jkl_mno-pqr", ["abc.def+ghi/jkl_mno-pqr", "def+ghi/jkl_mno-pqr"]),
+    ("left abcdefghijklmnopqrstuv right", ["abcdefghijklmnopqrstuv", "abcdefghijklmnopqrstuv"]),
+    (("primarySecretToken123456 " * 2048), ["primarySecretToken123456"] +
+     [f"missingSecretToken{index:04d}" for index in range(256)]),
 ])
-def test_masking_matches_the_alternation_it_replaced(text, literals):
-    ordered = sorted(literals, key=len, reverse=True)
-    assert memory_manager._mask_learned_literals(text, ordered) == _alternation_mask(text, literals)
-
-
-def test_a_text_without_a_learned_literal_comes_back_as_itself():
-    text = "nothing to mask here"
-    assert memory_manager._mask_learned_literals(text, ["absent", ""]) is text  # identity, and an empty literal cannot loop
+def test_handoff_preserves_literal_overlap_input_ownership_and_media_passthrough(text, literals):
+    sources = tuple("Authorization: Bearer " + value for value in literals)
+    marker = "data:image/png;base64," + literals[0]
+    unchanged = {"label": "ordinary clean text", "count": 7}
+    echo = {"nested": ([text], marker), "stable": unchanged}
+    output = _redact_for_provider(sources, echo)
+    scrubbed = redact_for_egress(text)
+    pattern = re.compile("|".join(re.escape(value) for value in sorted(set(literals), key=len, reverse=True)))
+    assert output[1]["nested"][0][0] == pattern.sub("[redacted]", scrubbed)
+    assert output[1]["nested"][1] is marker
+    assert output[1]["stable"] is unchanged
+    assert echo["nested"][0][0] == text
+    if scrubbed == text and not pattern.search(text):
+        assert output[1] is echo
+    assert _redact_for_provider(text) is text  # no learned credential state crosses handoffs
