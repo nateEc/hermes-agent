@@ -8,8 +8,9 @@ import re
 _BOUNDARY_SUBS = (
     (re.compile(r"(^|[\s\n>:\]\)])\[200~"), r"\1"),
     (re.compile(r"\[201~(?=$|[\s\n<\[\(\):;.,!?])"), ""),
-    (re.compile(r"(^|[\s\n>:\]\)])00~"), r"\1"),
-    (re.compile(r"01~(?=$|[\s\n<\[\(\):;.,!?])"), ""),
+    # Bare fragments after a digit and colon are minutes, not paste controls.
+    (re.compile(r"(^|[\s\n>:\]\)])(?<![0-9]:)00~"), r"\1"),
+    (re.compile(r"(?<![0-9]:)01~(?=$|[\s\n<\[\(\):;.,!?])"), ""),
 )
 
 # Corruption signature from desktop bracketed-paste leaks (#62557).
