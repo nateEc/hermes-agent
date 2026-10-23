@@ -1,114 +1,98 @@
-"""Regression for #143233: bare webhook routes under multiplex isolation.
+"""Authenticated webhook scripts run with their owner's profile, not ambient state (#143233)."""
 
-A bare ``POST /webhooks/<route>`` is default-bound (``_route_allows_profile``), but
-``WebhookAdapter._profile_scope(None)`` used to be a no-op. On a multiplexed gateway
-``get_secret`` fails closed without a scope, so a route script's
-``build_subprocess_env()`` raised ``UnscopedSecretError`` before the interpreter
-spawned, and the route answered ``200 {"status": "ignored", "reason": "script"}``
-while the script never ran. A single skill-registered env passthrough (a process-wide
-allowlist) was enough to trigger it; prefixed ``/p/<profile>/`` routes were immune.
-
-``_profile_scope`` now enters the launch home's runtime scope when multiplexing is
-active and no profile prefix was requested — the same fix the api_server listener got
-for #61276. Single-profile gateways keep the no-op. No live gateway or network.
-"""
-
-from __future__ import annotations
+import hashlib
+import hmac
+import json
+from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
+from aiohttp import web
+from aiohttp.test_utils import TestClient, TestServer
 
-# Collection-time load: gateway.run settles hermes_bootstrap's update-recovery probe when the
-# per-test home-IO guard is not yet installed; at test time _profile_scope's lazy import then
-# hits the module cache instead of re-running that probe against a guarded path.
-import gateway.run
-from agent import secret_scope as ss
-from gateway.config import PlatformConfig
+from agent import secret_scope as secrets
+from gateway.config import GatewayConfig, PlatformConfig
 from gateway.platforms.webhook import WebhookAdapter
-
-
-@pytest.fixture(autouse=True)
-def _reset_multiplex():
-    ss.set_multiplex_active(False)
-    yield
-    ss.set_multiplex_active(False)
+from gateway.run import _profile_runtime_scope
+from hermes_constants import get_hermes_home
+from tools import env_passthrough
+from tui_gateway import launch_profile_policy
 
 
 @pytest.fixture
-def adapter() -> WebhookAdapter:
-    return WebhookAdapter(
-        PlatformConfig(
-            enabled=True, extra={"host": "127.0.0.1", "port": 0, "routes": {}}
-        )
-    )
+def profile_homes(tmp_path, monkeypatch):
+    home = tmp_path / ".hermes"
+    worker = home / "profiles" / "worker"
+    for path, value in ((home, "from-default"), (worker, "from-worker")):
+        (path / "scripts").mkdir(parents=True)
+        (path / "config.yaml").write_text("{}\n")
+        (path / ".env").write_text(f"NOTION_TOKEN={value}\n")
+        (path / "scripts" / "probe.py").write_text(
+            "import json, os, sys\nfrom pathlib import Path\n"
+            "payload = json.load(sys.stdin)\n"
+            "Path(__file__).with_suffix('.receipt.json').write_text(json.dumps({\n"
+            "  'credential_matches': os.environ.get('NOTION_TOKEN') == payload['expected']}))\n"
+            "print('[SILENT]')\n")
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setenv("NOTION_TOKEN", "from-process")
+    monkeypatch.setattr(launch_profile_policy, "_snapshot", None)
+    launch_profile_policy.capture_launch_env()
+    monkeypatch.setattr(env_passthrough, "_allowed_env_vars", set())
+    env_passthrough.register_env_passthrough(["NOTION_TOKEN"])
+    return home, worker
 
 
-@pytest.fixture
-def launch_home(tmp_path, monkeypatch):
-    """An isolated launch home whose ``.env`` carries the passthrough credential."""
-    (tmp_path / ".env").write_text("NOTION_TOKEN=from-launch-home\n", encoding="utf-8")
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
-    monkeypatch.setenv("NOTION_TOKEN", "from-environ")
-    return tmp_path
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("multiplex", "path", "env_only"), [
+    (False, "/webhooks/default", False),
+    (True, "/webhooks/default", False),
+    (True, "/p/default/webhooks/default", False),
+    (True, "/p/worker/webhooks/worker", False),
+    (True, "/webhooks/default", True),
+])
+async def test_signed_delivery_executes_the_real_script_with_its_own_credential(
+        profile_homes, multiplex, path, env_only):
+    home, worker = profile_homes
+    if env_only:
+        (home / ".env").write_text("")
+    signing_key = "signed-webhook-fixture"
+    routes = {"default": {"secret": signing_key, "script": "probe.py"},
+              "worker": {"secret": signing_key, "script": "probe.py", "profile": "worker"}}
+    adapter = WebhookAdapter(PlatformConfig(enabled=True, extra={"routes": routes, "host": "127.0.0.1"}))
+    adapter.gateway_runner = SimpleNamespace(config=GatewayConfig(multiplex_profiles=multiplex))
+    app = web.Application()
+    app.router.add_post("/webhooks/{route_name}", adapter._handle_webhook)
+    app.router.add_post("/p/{profile}/webhooks/{route_name}", adapter._handle_webhook)
+    owner = worker if "/worker/" in path else home
+    expected = "from-process" if env_only or not multiplex else (
+        "from-worker" if owner == worker else "from-default")
+    body = json.dumps({"expected": expected}).encode()
+    signature = "sha256=" + hmac.new(signing_key.encode(), body, hashlib.sha256).hexdigest()
+    token = secrets.set_multiplex_context(multiplex)
+    try:
+        async with TestClient(TestServer(app)) as client:
+            response = await client.post(path, data=body, headers={"X-Hub-Signature-256": signature})
+            assert response.status == 200
+            assert (await response.json())["reason"] == "script"  # intentional veto AFTER the side effect
+    finally:
+        secrets.reset_multiplex_context(token)
+    receipt = owner / "scripts" / "probe.receipt.json"
+    assert receipt.is_file(), "the authenticated script was silently skipped before spawning"
+    assert json.loads(receipt.read_text()) == {"credential_matches": True}
+    other = home if owner == worker else worker
+    assert not (other / "scripts" / "probe.receipt.json").exists()
 
 
-class TestProfileScopeBareRoute:
-    def test_noop_when_multiplex_off(self, adapter, monkeypatch):
-        monkeypatch.setenv("NOTION_TOKEN", "from-environ")
-        with adapter._profile_scope(None):
-            # Single-profile path: unscoped get_secret reads os.environ.
-            assert ss.current_secret_scope() is None
-            assert ss.get_secret("NOTION_TOKEN") == "from-environ"
-
-    def test_bare_route_binds_launch_home_when_multiplex_active(
-        self, adapter, launch_home
-    ):
-        token = ss.set_multiplex_context(True)
-        try:
-            with adapter._profile_scope(None):
-                assert ss.current_secret_scope() is not None
-                # An active multiplex scope is authoritative over the process env.
-                assert ss.get_secret("NOTION_TOKEN") == "from-launch-home"
-        finally:
-            ss.reset_multiplex_context(token)
-        assert ss.current_secret_scope() is None
-
-    def test_named_profile_still_binds_its_own_home(
-        self, adapter, tmp_path, monkeypatch
-    ):
-        profile_home = tmp_path / "profiles" / "worker"
-        profile_home.mkdir(parents=True)
-        (profile_home / ".env").write_text(
-            "NOTION_TOKEN=from-worker\n", encoding="utf-8"
-        )
-        monkeypatch.setattr(
-            "hermes_cli.profiles.get_profile_dir", lambda name: profile_home
-        )
-        token = ss.set_multiplex_context(True)
-        try:
-            with adapter._profile_scope("worker"):
-                assert ss.get_secret("NOTION_TOKEN") == "from-worker"
-        finally:
-            ss.reset_multiplex_context(token)
-
-    def test_route_script_env_resolves_passthrough_under_bare_route(
-        self, adapter, launch_home
-    ):
-        """The issue's reproduction: with a passthrough registered, a bare route's
-        ``build_subprocess_env()`` must not raise, and the credential resolves through
-        the launch home's scope instead of the process env."""
-        from tools import env_passthrough as ep
-        from tools.environments.local import build_subprocess_env
-
-        ep._get_allowed().add(
-            "NOTION_TOKEN"
-        )  # what skill_view → register_env_passthrough does
-        token = ss.set_multiplex_context(True)
-        try:
-            with adapter._profile_scope(None):
-                env = (
-                    build_subprocess_env()
-                )  # raised UnscopedSecretError before the fix
-            assert env.get("NOTION_TOKEN") == "from-launch-home"
-        finally:
-            ss.reset_multiplex_context(token)
-            ep._get_allowed().discard("NOTION_TOKEN")
+def test_bare_scope_ignores_a_foreign_ambient_profile_and_restores_it(profile_homes):
+    home, worker = profile_homes
+    token = secrets.set_multiplex_context(True)
+    try:
+        with _profile_runtime_scope(worker):
+            with WebhookAdapter._profile_scope(None):
+                assert get_hermes_home() == home
+                assert secrets.get_secret("NOTION_TOKEN") == "from-default"
+            assert get_hermes_home() == worker
+            assert secrets.get_secret("NOTION_TOKEN") == "from-worker"
+    finally:
+        secrets.reset_multiplex_context(token)
