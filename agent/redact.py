@@ -614,17 +614,21 @@ def _last_char_class(pattern: str) -> "str | None":
 
 
 def _compile_prefix_matcher(patterns: list) -> re.Pattern[str]:
-    # The trailing guard may only negate a pattern's own body class. One shared
+    # Restrict the old trailing guard to a pattern's own body class. One shared
     # class wider than a body (``_``/``-`` vs ``ghp_…[A-Za-z0-9]{10,}``) fails at
     # the body's natural end and at every backtrack step alike, so a token
     # followed by an underscore/dash is not matched at all and ships in cleartext
-    # (#142852). A pattern without a ``[...]`` class falls back to the shared class.
+    # (#142852). Intersect, never replace: a wider plugin class (e.g. a fixed
+    # [A-Z/.]{16} body) must not lose old matches before slash/dot delimiters.
+    # Shorthand-body patterns still accept underscore/dash delimiters.
     branches = []
     for pattern in patterns:
         body_class = _last_char_class(pattern)
-        guard = f"(?!{body_class})" if body_class is not None else r"(?![A-Za-z0-9_-])"
+        guard = f"(?!(?=[A-Za-z0-9_-]){body_class})" if body_class is not None else r"(?![A-Za-z0-9])"
         branches.append(f"(?:{pattern}){guard}")
-    return re.compile(r"(?<![A-Za-z0-9_-])(" + "|".join(branches) + r")")
+    # Hyphens separate filenames/slugs from credentials; letters and underscores
+    # still exclude embedded identifiers (e.g. ``myghp_…`` or ``name_ghp_…``).
+    return re.compile(r"(?<![A-Za-z0-9_])(" + "|".join(branches) + r")")
 
 
 _PREFIX_RE = _compile_prefix_matcher(_PREFIX_PATTERNS)
