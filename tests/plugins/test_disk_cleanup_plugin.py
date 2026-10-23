@@ -712,44 +712,41 @@ class TestBundledDiscovery:
 
 
 class TestSandboxDurableTrees:
-    """The user trees a persistent Docker sandbox bind-mounts (#143104).
+    """Backend-owned state survives file and empty-directory cleanup (#143104)."""
 
-    ``terminal.container_persistent`` bind-mounts ``$HERMES_HOME/sandboxes/docker/<profile>/
-    {workspace,home}`` as ``/workspace`` and ``/root``. Those are the durable trees the docs tell
-    the agent to write deliverables into, and they are the same ``workspace``/``home`` names the
-    top-level check already protects — one directory deeper than it looks, so a ``test_*`` written
-    there was tracked as disposable and deleted when the session ended.
-    """
-
-    @pytest.mark.parametrize("relative", [
-        ("sandboxes", "docker", "default", "workspace", "dataset", "test_validator.py"),
-        ("sandboxes", "docker", "default", "home", "tmp_manifest.json"),
-        # A profile name is not part of the shape: the durable segment is what matters.
-        ("sandboxes", "docker", "work", "workspace", "test_harness.py"),
-        # Another backend mirrors the same trees.
-        ("sandboxes", "podman", "default", "home", "test_env.py"),
-    ])
-    def test_a_test_file_in_the_sandbox_is_not_disposable(self, _isolate_env, relative):
+    @pytest.mark.parametrize("custom", [False, True])
+    def test_sandbox_files_and_empty_dirs_survive_cleanup(self, _isolate_env, monkeypatch, custom):
         dg = _load_lib()
-        p = _isolate_env.joinpath(*relative)
-        p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text("x")
-        assert dg.guess_category(p) is None
+        root = _isolate_env / ("scratch/containers" if custom else "sandboxes")
+        monkeypatch.delenv("TERMINAL_SANDBOX_DIR", raising=False)
+        if custom:
+            monkeypatch.setenv("TERMINAL_SANDBOX_DIR", str(root))
+        files, directories = [], []
+        for backend, tree, category in (("docker", "workspace", "test"), ("podman", "home", "temp")):
+            base = root / backend / "named-profile" / tree
+            empty = base / "empty-deliverable" / "child"
+            empty.mkdir(parents=True)
+            path = base / "test_validator.py"
+            path.write_text("durable")
+            assert dg.track(str(path), category, silent=True)  # legacy/manual entry
+            files.append(path)
+            directories.append(empty)
+        tracked = dg.load_tracked()
+        for item in tracked:
+            item["timestamp"] = (datetime.now(UTC) - timedelta(days=10)).isoformat()
+        dg.save_tracked(tracked)
+        assert all(dg.guess_category(path) is None for path in files)
+        assert dg.dry_run() == ([], [])
+        assert dg.quick()["deleted"] == 0
+        assert all(path.read_text() == "durable" for path in files)
+        assert all(path.is_dir() for path in directories)
 
-    def test_the_rest_of_the_sandbox_stays_sweepable(self, _isolate_env):
-        """The control: a ``test_*`` outside the bind-mounted trees is still scratch."""
+    def test_scratch_outside_backend_state_remains_collectible(self, _isolate_env):
         dg = _load_lib()
-        p = _isolate_env / "sandboxes" / "docker" / "default" / "cache" / "test_blob.py"
+        p = _isolate_env / "sandboxes-scratch" / "workspace" / "test_blob.py"
         p.parent.mkdir(parents=True)
         p.write_text("x")
         assert dg.guess_category(p) == "test"
-
-    def test_quick_leaves_a_stored_sandbox_entry_alone(self, _isolate_env):
-        """A path tracked by an older build is re-validated through the same rule."""
-        dg = _load_lib()
-        p = _isolate_env / "sandboxes" / "docker" / "default" / "workspace" / "test_keep.py"
-        p.parent.mkdir(parents=True)
-        p.write_text("x")
-        assert dg.track(str(p), "test", silent=True) is True
-        assert dg.quick()["deleted"] == 0
-        assert p.exists() is True
+        assert dg.track(str(p), "test", silent=True)
+        assert dg.quick()["deleted"] == 1
+        assert not p.parent.exists()

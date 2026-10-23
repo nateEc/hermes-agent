@@ -56,6 +56,10 @@ Deletion rules (same as the original PR):
 - A tracked *directory* under a protected top level (e.g. `cache/`, which holds
   terminal snapshots) is never removed; only its files age out. Stale entries
   are logged as `SKIPPED` and dropped
+- Backend-owned sandbox storage (`$HERMES_HOME/sandboxes/` and an existing
+  `TERMINAL_SANDBOX_DIR` override) is never auto-tracked or swept, including
+  empty directories and files left in an older cleanup index. Backends manage
+  their own sandbox lifecycle.
 - Backup/restore is scoped to `tracked.json` — the plugin never touches
   agent logs
 - Atomic writes: `.tmp` → backup → rename

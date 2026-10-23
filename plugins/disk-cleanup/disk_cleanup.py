@@ -12,6 +12,7 @@ import contextlib
 import functools
 import json
 import logging
+import os
 import shutil
 from datetime import datetime, timezone, UTC
 from pathlib import Path
@@ -138,25 +139,21 @@ def _is_protected_dir(p: Path) -> bool:
     (``cache/terminal`` holds terminal snapshots) is never rmtree'd; only its files age out."""
     if not p.is_dir():
         return False
+    if _is_durable_sandbox_path(p):
+        return True
     with contextlib.suppress(ValueError, OSError):
         rel = p.resolve().relative_to(get_hermes_home())
         return not rel.parts or rel.parts[0] in _EMPTY_DIR_PROTECTED_TOP_LEVEL
     return False
 
 
-# The user trees a persistent sandbox bind-mounts to the container: ``workspace`` is ``/workspace``
-# and ``home`` is ``/root``, and both live at ``$HERMES_HOME/sandboxes/<backend>/<profile>/``. They
-# are the same durable deliverables as the top-level ``workspace``/``home`` in
-# ``_NEVER_TRACK_TOP_LEVEL``, one directory deeper than that check looks: ``rel.parts[0]`` is
-# ``sandboxes`` for them, so the frozenset never matched and a ``test_*`` the agent wrote into the
-# sandbox was classified disposable and deleted when the session ended (#143104).
-_SANDBOX_DURABLE_TREES = frozenset({"workspace", "home"})
-
-
-def _is_durable_sandbox_path(rel: Path) -> bool:
-    """True when *rel* is one of the user trees a persistent sandbox mirrors."""
-    return bool(rel.parts) and rel.parts[0] == "sandboxes" and any(
-        part in _SANDBOX_DURABLE_TREES for part in rel.parts[1:])
+def _is_durable_sandbox_path(path: Path) -> bool:
+    """Backends own sandbox lifecycle; their storage is not session scratch (#143104)."""
+    roots = [get_hermes_home() / "sandboxes"]
+    if custom := os.getenv("TERMINAL_SANDBOX_DIR"):
+        roots.append(Path(custom))  # same override as environments.base.get_sandbox_dir()
+    resolved = path.resolve()
+    return any(resolved.is_relative_to(root.resolve()) for root in roots)
 
 @functools.lru_cache(maxsize=8)  # keyed by home: a multiplexed process serves several profiles
 def _protected_cron_paths(home: Path) -> frozenset:
@@ -275,7 +272,8 @@ def dry_run() -> tuple[list[dict], list[dict]]:
     for item, p, age in _live_items(load_tracked(), datetime.now(UTC)):
         cat = item["category"]
         # Stale cron-output entries and protected dirs are skipped by quick(); omit them here too.
-        if (cat == "cron-output" and guess_category(p) != "cron-output") or _is_protected_dir(p):
+        if (_is_durable_sandbox_path(p) or _is_protected_dir(p)
+                or (cat == "cron-output" and guess_category(p) != "cron-output")):
             continue
         if _is_auto_delete(cat, age):
             auto.append(item)
@@ -291,6 +289,9 @@ def quick() -> dict[str, Any]:
     errors: list[str] = []
     for item, p, age in _live_items(load_tracked(), datetime.now(UTC), log_stale=True):
         cat = item["category"]
+        if _is_durable_sandbox_path(p):
+            _log(f"SKIP backend-owned sandbox path: {p}")
+            continue
         if cat in _STALE_SKIP_NOTE and (re_cat := guess_category(p)) != cat:
             # Misclassified stale entry — drop it rather than delete the file.
             _log(f"SKIP stale {cat} entry: {p} (re-classified as {re_cat!r}{_STALE_SKIP_NOTE[cat]})")
@@ -320,7 +321,8 @@ def quick() -> dict[str, Any]:
 
 def _subdirs(dirpath: Path, exclude: frozenset) -> list[Path]:
     try:
-        return [c for c in dirpath.iterdir() if c.is_dir() and not c.is_symlink() and c.name not in exclude]
+        return [c for c in dirpath.iterdir() if c.is_dir() and not c.is_symlink()
+                and c.name not in exclude and not _is_durable_sandbox_path(c)]
     except OSError:
         return []
 
@@ -423,12 +425,12 @@ def _inside_git_worktree(path: Path) -> bool:
 
 def guess_category(path: Path) -> Optional[str]:
     """Category label for *path*, or None if we shouldn't track it (``post_tool_call`` hook)."""
-    if not is_safe_path(path):
+    if not is_safe_path(path) or _is_durable_sandbox_path(path):
         return None
     with contextlib.suppress(ValueError):  # not under HERMES_HOME (/tmp/hermes-*) — name rules only
         rel = path.resolve().relative_to(get_hermes_home())
         top = rel.parts[0] if rel.parts else ""
-        if top in _NEVER_TRACK_TOP_LEVEL or _is_protected_dir(path) or _is_durable_sandbox_path(rel):
+        if top in _NEVER_TRACK_TOP_LEVEL or _is_protected_dir(path):
             return None
         if top in ("cron", "cronjobs"):
             # Only the disposable ``output/`` subtree; control-plane state (jobs.json,
