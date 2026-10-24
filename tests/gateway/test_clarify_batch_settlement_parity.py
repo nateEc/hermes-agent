@@ -19,6 +19,8 @@ QIDS = ['q0', 'q1']
 
 # ending -> (how the wait ends after q0 is locked, expected result)
 CASES = {
+    'error_frame': ({'error': {'code': -32601, 'message': 'no handler'}},
+                    {'answers': {'q0': 'blue'}, 'outcome': 'cancelled'}),
     'cancel_all_frame': ({'result': {}}, {'answers': {'q0': 'blue'}, 'outcome': 'cancelled'}),
     'closing_frame_with_tail': ({'result': {'answers': {'q1': 'large'}}},
                                 {'answers': {'q0': 'blue', 'q1': 'large'}, 'outcome': 'submitted'}),

@@ -87,7 +87,9 @@ async def probe(peer):
     a = b = None
     sid = None
     try:
-        a, b = await websockets.connect(url), await websockets.connect(url)
+        # The loopback fixture must not use the host's system proxy.
+        a = await websockets.connect(url, proxy=None)
+        b = await websockets.connect(url, proxy=None)
         created = await rpc(a, 1, 'session.create', source='cli', request_id='create-1', cwd=os.getcwd())
         assert 'result' in created, created
         sid = created['result']['session_id']

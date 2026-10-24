@@ -300,7 +300,11 @@ def resolve_response(frame: dict, transport: Any = None) -> bool:
         _open.pop(rid, None)
         if "error" in frame:
             logger.debug("server request %s (%s) answered with error: %s", rid, req.method, frame.get("error"))
-            req.result, req.answered = None, False
+            if req.qids is not None:
+                # An error cancels a delivered batch, without discarding its locked answers.
+                req.result, req.answered = settle_batch(req.locked, ended="cancelled"), True
+            else:
+                req.result, req.answered = None, False
         else:
             result = frame.get("result")
             req.result = result if isinstance(result, dict) else {}
