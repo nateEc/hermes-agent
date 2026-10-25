@@ -204,7 +204,7 @@ export default {
             })
           }
 
-          return items.slice(0, 8)
+          return items
         }
       }
     })

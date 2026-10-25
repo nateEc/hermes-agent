@@ -285,6 +285,19 @@ describe('@-mention completions', () => {
     expect(inserts).not.toContain('@renametest')
   })
 
+  it.each([15, 31])('offers every eligible bot in a %i-profile roster and still filters by prefix', async count => {
+    const profiles = Array.from({ length: count }, (_, index) => ({ name: `agent-${index}` }))
+    const focused = profiles[0].name
+    const { provide } = await contributions({ focused, profiles })
+    const offered = profiles.slice(1).map(profile => `@${profile.name}`)
+
+    expect(provide('').map(item => item.insert)).toEqual(offered)
+    expect(provide('agent-1').map(item => item.insert)).toEqual(
+      offered.filter(insert => insert.startsWith('@agent-1'))
+    )
+    expect(provide(profiles.at(-1)!.name).map(item => item.insert)).toEqual([offered.at(-1)])
+  })
+
   it('yields nothing, and never throws, on a cold roster cache', async () => {
     const { provide } = await contributions({ profiles: [] })
 

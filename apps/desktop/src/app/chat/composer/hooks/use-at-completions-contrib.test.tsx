@@ -73,6 +73,21 @@ describe('contributed @ completion sources', () => {
     expect(rows.some(l => l.includes('research-notes.md'))).toBe(true)
   })
 
+  it('keeps the complete contributed roster through the live popover adapter', async () => {
+    vi.useFakeTimers()
+    const bots = Array.from({ length: 15 }, (_, index) => `@agent-${index}`)
+    addSource('bots', () => bots.map(insert => ({ insert, meta: 'Bot' })))
+
+    const { result } = renderHook(() =>
+      useAtCompletions({ gateway: gatewayStub() as never, sessionId: 's1', cwd: '/repo' })
+    )
+
+    const rows = await searchAndRead(result, '')
+
+    expect(rows.slice(0, bots.length)).toEqual(bots)
+    expect(rows.some(label => label.includes('research-notes.md'))).toBe(true)
+  })
+
   it('deduplicates contributed and core profile handles without collapsing distinct references', async () => {
     vi.useFakeTimers()
     addSource('bots', q => ('researcher'.startsWith(q) ? [{ insert: '@Researcher', meta: 'Bot · Researcher' }] : []))
