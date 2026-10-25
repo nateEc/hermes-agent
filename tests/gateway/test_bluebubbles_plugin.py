@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock
 
 import httpx
 import pytest
+import pytest_asyncio
 
 from gateway.config import Platform, PlatformConfig
 from gateway.platforms.base import BasePlatformAdapter
@@ -109,6 +110,70 @@ class TestBlueBubblesMentionGating:
 
         assert response.status == 200
         assert handled == []
+
+
+@pytest_asyncio.fixture
+async def tapback_webhook(monkeypatch):
+    from aiohttp import web
+    from aiohttp.test_utils import TestClient, TestServer
+
+    adapter = _make_adapter(monkeypatch, send_read_receipts=False)
+    handled = AsyncMock()
+    download = AsyncMock(return_value="/tmp/cached.jpg")
+    monkeypatch.setattr(adapter, "handle_message", handled)
+    monkeypatch.setattr(adapter, "_download_attachment", download)
+    app = web.Application()
+    app.router.add_post(adapter.webhook_path, adapter._handle_webhook)
+    async with TestClient(TestServer(app)) as client:
+        yield adapter, client, handled, download
+        await asyncio.gather(*adapter._background_tasks)
+
+
+def tapback_payload(associated_type):
+    return {"type": "new-message", "data": {
+        "guid": "tapback-test",
+        "text": "I love this!",
+        "handle": {"address": "+15555550100"},
+        "chats": [{"guid": "iMessage;-;+15555550100"}],
+        "associatedMessageType": associated_type,
+        "attachments": [{"guid": "attachment-test", "mimeType": "image/jpeg"}],
+    }}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("associated_type", [
+    *range(2000, 2008), *range(3000, 3008),
+    *(str(code) for code in [*range(2000, 2008), *range(3000, 3008)]),
+    *(prefix + name for prefix in ("", "-")
+      for name in ("love", "like", "dislike", "laugh", "emphasize", "question")),
+])
+async def test_tapback_webhook_acknowledges_without_downloading_or_dispatching(tapback_webhook, associated_type):
+    adapter, client, handled, download = tapback_webhook
+    payload = tapback_payload(associated_type)
+    refused = await client.post(adapter.webhook_path, params={"password": "wrong"}, json=payload)
+    assert refused.status == 401
+    response = await client.post(adapter.webhook_path, params={"password": "secret"}, json=payload)
+    await asyncio.gather(*adapter._background_tasks)
+
+    assert response.status == 200
+    download.assert_not_awaited()
+    handled.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("associated_type", [None, 0, "0", 1000, "sticker", 2008, "unknown", [], {}])
+async def test_non_tapback_webhook_preserves_text_and_attachments(tapback_webhook, associated_type):
+    adapter, client, handled, download = tapback_webhook
+    response = await client.post(adapter.webhook_path, params={"password": "secret"},
+                                 json=tapback_payload(associated_type))
+    await asyncio.gather(*adapter._background_tasks)
+
+    assert response.status == 200
+    download.assert_awaited_once()
+    handled.assert_awaited_once()
+    event = handled.await_args.args[0]
+    assert event.text == "I love this!"
+    assert event.media_urls == ["/tmp/cached.jpg"]
 
 
 class TestBlueBubblesWebhookParsing:

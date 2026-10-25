@@ -54,8 +54,13 @@ MAX_TEXT_LENGTH = 4000
 # `require_mention: true` without custom aliases uses Hermes wake words.
 DEFAULT_MENTION_PATTERNS = [r"(?<![\w@])@?hermes\s+agent\b[,:\-]?", r"(?<![\w@])@?hermes\b[,:\-]?"]
 
-# Tapback associatedMessageType codes: 2000-2005 added, 3000-3005 removed (love, like, dislike, ...).
-_TAPBACK_CODES = {*range(2000, 2006), *range(3000, 3006)}
+# BlueBubbles names classic tapbacks but stringifies unrecognized numeric types.
+# 2006/3006 are emoji reactions; 2007/3007 are sticker reactions.
+_TAPBACK_CODES = {*range(2000, 2008), *range(3000, 3008)}
+_TAPBACK_TYPES = _TAPBACK_CODES | {str(code) for code in _TAPBACK_CODES} | {
+    prefix + name for prefix in ("", "-")
+    for name in ("love", "like", "dislike", "laugh", "emphasize", "question")
+}
 _MESSAGE_EVENTS = {"new-message", "message", "updated-message"}  # webhook event types carrying user messages
 
 _PHONE_RE = re.compile(r"\+?\d{7,15}")
@@ -579,7 +584,7 @@ class BlueBubblesAdapter(BasePlatformAdapter):
         if record.get("isFromMe") or record.get("fromMe") or record.get("is_from_me"):
             return _ok()
         assoc_type = record.get("associatedMessageType")
-        if isinstance(assoc_type, int) and assoc_type in _TAPBACK_CODES:  # tapback reactions delivered as messages
+        if isinstance(assoc_type, (int, str)) and assoc_type in _TAPBACK_TYPES:
             return _ok()
         text = self._value(record.get("text"), record.get("message"), record.get("body")) or ""
         chat_guid, chat_identifier, sender = self._resolve_chat_and_sender(payload, record)
