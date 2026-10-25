@@ -3,6 +3,8 @@ import { act, cleanup, render } from '@testing-library/react'
 import { MemoryRouter } from 'react-router'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
+import { group, split } from '@/components/pane-shell/tree/model'
+import { $activeTreeGroup, $layoutTree } from '@/components/pane-shell/tree/store'
 import {
   $parkedQueueSessions,
   $queuedPromptsBySession,
@@ -30,6 +32,8 @@ import type { AmbientGatewayRequest } from './session-rpc-dispatcher'
 // dispatcher. Stub unrelated chrome/boot and the prompt/network boundaries;
 // this proves scheduling/routing, not a WebSocket or an LLM's execution.
 const fixture = vi.hoisted(() => ({
+  archiveSession: vi.fn(async (_sessionId: string) => undefined),
+  archiveSelectedSession: null as (() => void) | null,
   ambientRequest: vi.fn(async () => {
     throw new Error('foreground must not receive background RPCs')
   }),
@@ -114,10 +118,16 @@ vi.mock('../session/hooks/use-message-stream', () => ({ useMessageStream: () => 
 vi.mock('../session/hooks/use-model-controls', () => ({ useModelControls: () => ({}) }))
 vi.mock('../session/hooks/use-preview-routing', () => ({ usePreviewRouting: () => ({}) }))
 vi.mock('../session/hooks/use-route-resume', () => ({ useRouteResume: () => ({}) }))
-vi.mock('../session/hooks/use-session-actions', () => ({ useSessionActions: () => ({}) }))
+vi.mock('../session/hooks/use-session-actions', () => ({
+  useSessionActions: () => ({ archiveSession: fixture.archiveSession })
+}))
 vi.mock('../session/hooks/use-session-list-actions', () => ({ useSessionListActions: () => ({}) }))
 vi.mock('../chat/hooks/use-composer-actions', () => ({ useComposerActions: () => ({}) }))
-vi.mock('../hooks/use-keybinds', () => ({ useKeybinds: () => ({}) }))
+vi.mock('../hooks/use-keybinds', () => ({
+  useKeybinds: ({ archiveSelectedSession }: { archiveSelectedSession: () => void }) => {
+    fixture.archiveSelectedSession = archiveSelectedSession
+  }
+}))
 vi.mock('../hud/handoff', () => ({ useHudHandoff: () => ({}) }))
 vi.mock('../shell/hooks/use-overlay-routing', () => ({ useOverlayRouting: () => ({}) }))
 vi.mock('./hooks/use-background-sync', () => ({ useBackgroundSync: () => ({}) }))
@@ -175,6 +185,9 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup()
+  $activeTreeGroup.set(null)
+  $layoutTree.set(null)
+  fixture.archiveSelectedSession = null
   queryClient.clear()
   $queuedPromptsBySession.set({})
   $parkedQueueSessions.set({})
@@ -234,4 +247,33 @@ describe('ContribWiring background queue: independent remote owner', () => {
     })
     expect(getQueuedPrompts('stored-remote')).toHaveLength(0)
   })
+})
+
+it.each(['tile', 'primary', 'empty'] as const)('archives only the focused conversation (%s)', async focus => {
+  const primary = group(['workspace'])
+  const tile = group(['session-tile:stored-remote'])
+  $layoutTree.set(split('row', [primary, tile]))
+  $activeTreeGroup.set(focus === 'tile' ? tile.id : primary.id)
+
+  if (focus === 'empty') {
+    $selectedStoredSessionId.set(null)
+  }
+
+  render(
+    <MemoryRouter>
+      <QueryClientProvider client={queryClient}>
+        <ContribWiring>{null}</ContribWiring>
+      </QueryClientProvider>
+    </MemoryRouter>
+  )
+
+  await act(async () => fixture.archiveSelectedSession!())
+
+  if (focus === 'empty') {
+    expect(fixture.archiveSession).not.toHaveBeenCalled()
+  } else {
+    expect(fixture.archiveSession).toHaveBeenCalledExactlyOnceWith(
+      focus === 'tile' ? 'stored-remote' : 'stored-foreground'
+    )
+  }
 })
