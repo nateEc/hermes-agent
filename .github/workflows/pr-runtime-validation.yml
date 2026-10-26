@@ -15,7 +15,7 @@ jobs:
     steps:
       - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
         with:
-          ref: 7feae4f551b103cbd98bca4b7273bf0cd0e0f88e
+          ref: 6fae5c4681bb913a48d3d60039a159c556d7cb96
           fetch-depth: 0
       - name: Set up locked Python and test dependencies
         uses: ./.github/actions/setup-pm
@@ -36,10 +36,10 @@ jobs:
         shell: bash
         run: |
           cp tests/hermes_cli/test_gateway_windows.py "$RUNNER_TEMP/gateway_windows_probes.py"
-          git checkout edab579989a1680a6cbd2bb98ad30dc165c36c8b
+          git checkout fe0e58b67f2c1f09e853845cd7d2b8e4c737857f
           cp "$RUNNER_TEMP/gateway_windows_probes.py" tests/hermes_cli/test_gateway_windows.py
           set +e
           HERMES_TEST_FILE_RETRIES=0 bash scripts/run_tests.sh tests/hermes_cli/test_gateway_windows.py -k test_native_unicode_launcher_runs_in_requested_home -q -j 2
           result=$?
-          echo "Unfixed-base native probe exit code: $result"
-          exit 0
+          echo "Current-main native probe exit code: $result (CMD must fail; VBS is already fixed)"
+          test "$result" -eq 1
